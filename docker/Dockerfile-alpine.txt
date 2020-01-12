@@ -1,0 +1,9 @@
+FROM alpine
+
+WORKDIR /
+
+COPY   cmd/goreverselb/goreverselb /goreverselb
+
+EXPOSE 9999
+
+CMD ["/goreverselb", "server"]

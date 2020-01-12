@@ -1,0 +1,82 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	tunnel "github.com/dariopb/goreverselb/pkg"
+	"github.com/dariopb/goreverselb/pkg/certHelper"
+
+	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
+)
+
+func main() {
+	fmt.Println("goreverselb starting...")
+
+	port := 9999
+	if p, err := strconv.Atoi(os.Getenv("PORT")); err == nil {
+		port = p
+	}
+
+	loglevel := log.InfoLevel
+	if l, err := log.ParseLevel(os.Getenv("LOGLEVEL")); err == nil {
+		loglevel = l
+	}
+
+	//log.AddHook(ProcessCounter)
+	log.SetFormatter(&logrus.TextFormatter{ForceColors: true})
+	log.SetLevel(loglevel)
+	log.SetOutput(os.Stdout)
+
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	cert, err := certHelper.CreateDynamicTlsCertWithKey("localhost")
+	if err != nil {
+		log.Fatalf("failed to create tls certificate: ", err)
+	}
+
+	//pubsub.NewNatsServer(*cert, port, "1234")
+	//<-c
+	//tunnel.NewTunnelService(*cert, port, "1234")
+	tunnel.NewMuxTunnelService(*cert, port, "1234")
+
+	time.Sleep(1 * time.Second)
+
+	td := tunnel.TunnelData{
+		ServiceName:          "web8888",
+		Token:                "1234",
+		BackendAcceptBacklog: 1,
+		FrontendData: tunnel.FrontendData{
+			Port: 8888,
+		},
+		TargetPort:      80,
+		TargetAddresses: []string{"www.google.com"},
+	}
+
+	td1 := tunnel.TunnelData{
+		ServiceName: "web7777",
+		Token:       "12345",
+		FrontendData: tunnel.FrontendData{
+			Port: 7777,
+		},
+		TargetPort:      80,
+		TargetAddresses: []string{"www.microsoft.com"},
+	}
+
+	tc, _ := tunnel.NewMuxTunnelClient("localhost:9999", td)
+	tunnel.NewMuxTunnelClient("localhost:9999", td1)
+
+	time.Sleep(10000 * time.Second)
+	tc.Close()
+
+	td.FrontendData.Port = 7777
+	tc, _ = tunnel.NewMuxTunnelClient("localhost:9999", td)
+
+	<-c
+}

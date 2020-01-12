@@ -1,0 +1,14 @@
+
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build
+
+
+
+docker login -u dariob
+
+# alpine
+docker build -f docker/Dockerfile-alpine.txt -t dariob/reverselb-alpine .
+docker tag dariob/reverselb-alpine dariob/reverselb-alpine:0.1
+docker tag dariob/reverselb-alpine dariob/reverselb-alpine:latest
+docker push dariob/reverselb-alpine:latest
+docker push dariob/reverselb-alpine:0.1
+
