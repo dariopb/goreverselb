@@ -2,7 +2,7 @@ FROM alpine
 
 WORKDIR /
 
-COPY   cmd/goreverselb/goreverselb /goreverselb
+COPY   goreverselb /goreverselb
 
 EXPOSE 9999
 

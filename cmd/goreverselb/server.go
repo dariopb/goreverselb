@@ -10,6 +10,8 @@ import (
 
 	tunnel "github.com/dariopb/goreverselb/pkg"
 	"github.com/dariopb/goreverselb/pkg/certHelper"
+	pubsub "github.com/dariopb/goreverselb/pkg/pubsub"
+	restapi "github.com/dariopb/goreverselb/pkg/restapi"
 	version "github.com/dariopb/goreverselb/version"
 
 	log "github.com/sirupsen/logrus"
@@ -26,6 +28,8 @@ func printVersion() {
 var port int
 var loglevelstr string
 var autocertsubjectname string
+var httpport int
+var natsport int
 
 // client
 var lbapiendpoint string
@@ -94,6 +98,22 @@ func main() {
 						EnvVars:     []string{"AUTO_CERT_SUBJECT_NAME"},
 						Destination: &autocertsubjectname,
 						Required:    true,
+					},
+					&cli.IntFlag{
+						Name:        "httpport",
+						Value:       0,
+						Usage:       "port for the HTTP rest endpoint (server will be disabled if not provided)",
+						EnvVars:     []string{"HTTP_PORT"},
+						Destination: &httpport,
+						Required:    false,
+					},
+					&cli.IntFlag{
+						Name:        "natsport",
+						Value:       0,
+						Usage:       "port for the secure NATS endpoint (server will be disabled if not provided)",
+						EnvVars:     []string{"NATS_PORT"},
+						Destination: &natsport,
+						Required:    false,
 					},
 				},
 			},
@@ -183,15 +203,29 @@ func server(ctx *cli.Context) error {
 		log.Fatalf("failed to create tls certificate: ", err)
 	}
 
-	_, err = tunnel.NewMuxTunnelService(*cert, port, token)
+	ts, err := tunnel.NewMuxTunnelService(*cert, port, token)
 	if err != nil {
 		log.Fatalf("failed to start new tunnel service: ", err)
+	}
+
+	if natsport != 0 {
+		pubsub.NewNatsServer(*cert, natsport, token)
+	} else {
+		log.Debug("natsport not provided, not starting NATS server")
+	}
+
+	if httpport != 0 {
+		restapi.NewRestApi(*cert, httpport, token, ts)
+	} else {
+		log.Debug("httpport not provided, not starting HTTP server")
 	}
 
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	<-c
+
+	ts.Close()
 
 	return err
 }

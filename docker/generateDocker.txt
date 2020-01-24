@@ -1,7 +1,12 @@
+export GOPATH=/home/dario/go
+go get github.com/rakyll/statik
 
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build
+go generate ./pkg/restapi
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v ./cmd/goreverselb
 
 
+
+go build -v cmd/main.go
 
 docker login -u dariob
 

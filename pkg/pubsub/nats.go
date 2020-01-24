@@ -2,36 +2,46 @@ package pubsub
 
 import (
 	"crypto/tls"
-	"time"
+	"crypto/x509"
 
-	natsd "github.com/nats-io/nats-server/server"
+	stand "github.com/nats-io/nats-streaming-server/server"
+	stores "github.com/nats-io/nats-streaming-server/stores"
+
+	"github.com/nats-io/nats.go"
 )
 
-func NewNatsServer(cert tls.Certificate, servicePort int, token string) {
+func NewNatsServer(cert tls.Certificate, port int, token string) (*stand.StanServer, error) {
 	tlsconfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	roots := x509.NewCertPool()
 
-	// This configure the NATS Server using natsd package
-	nopts := &natsd.Options{}
-	nopts.Port = 8223
-	//nopts.HTTPSPort = 8443
-	nopts.TLSConfig = tlsconfig
+	//roots.AddCert()
+	tlsconfig.RootCAs = roots
+	tlsconfig.InsecureSkipVerify = true
 
-	// Setting a customer client authentication requires the NATS Server Authentication interface.
-	//nopts.CustomClientAuthentication = &myCustomClientAuth{}
+	// Get NATS Streaming Server default options
+	opts := stand.GetDefaultOptions()
+	opts.EnableLogging = true
+	opts.StoreLimits = stores.DefaultStoreLimits
+	opts.StoreLimits.MsgStoreLimits.MaxMsgs = 2
+	opts.ID = "pubsub-server"
+	opts.CustomLogger = LrusLogger{}
+	//opts.Secure = true
 
-	// Create the NATS Server
-	ns := natsd.New(nopts)
-	//ns.SetLogger(log.StandardLogger())
-	ns.ConfigureLogger()
+	oo := []nats.Option{nats.Name("nats_stream_server")}
+	oo = append(oo, nats.Secure(tlsconfig))
+	opts.NATSClientOpts = oo
 
-	// Start it as a go routine
-	go func() {
-		ns.Start()
-	}()
+	snopts := stand.NewNATSOptions()
+	//snopts.HTTPPort = 8223
+	snopts.TLSConfig = tlsconfig
+	snopts.Authorization = token
+	snopts.Port = port
 
-	// Wait for it to be able to accept connections
-	if !ns.ReadyForConnections(10 * time.Second) {
-		//	panic("not able to start")
+	// Run the server with the streaming and streaming/nats options.
+	s, err := stand.RunServerWithOpts(opts, snopts)
+	if err != nil {
+		return nil, err
 	}
 
+	return s, nil
 }

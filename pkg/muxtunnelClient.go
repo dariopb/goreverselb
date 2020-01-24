@@ -64,6 +64,7 @@ func NewMuxTunnelClient(apiEndpoint string, td TunnelData) (*MuxTunnelClient, er
 				case <-tc.closeCh:
 					return
 				default:
+					time.Sleep(10 * time.Second)
 				}
 			}
 		}()
@@ -83,11 +84,26 @@ func (tc *MuxTunnelClient) Close() {
 	tc.mtx.Unlock()
 }
 
+func (tc *MuxTunnelClient) TargetAddresses() []string {
+	tc.mtx.Lock()
+	endpoints := tc.tunnelData.TargetAddresses
+	tc.mtx.Unlock()
+
+	return endpoints
+}
+
 // UpdateTargetAddresses updates the list of backend addresses
 func (tc *MuxTunnelClient) UpdateTargetAddresses(addrs []string) {
 	tc.mtx.Lock()
 	tc.tunnelData.TargetAddresses = addrs
 	tc.mtx.Unlock()
+}
+
+// TargetPort returns the current service port
+func (tc *MuxTunnelClient) TargetPort() int {
+	tc.mtx.Lock()
+	defer tc.mtx.Unlock()
+	return tc.tunnelData.TargetPort
 }
 
 // UpdateTargetPort updates the backend target port
@@ -97,12 +113,11 @@ func (tc *MuxTunnelClient) UpdateTargetPort(port int) {
 	tc.mtx.Unlock()
 }
 
-func (tc *MuxTunnelClient) TargetAddresses() []string {
+// FrontendPort returns the current frontend port
+func (tc *MuxTunnelClient) FrontendPort() int {
 	tc.mtx.Lock()
-	endpoints := tc.tunnelData.TargetAddresses
-	tc.mtx.Unlock()
-
-	return endpoints
+	defer tc.mtx.Unlock()
+	return tc.tunnelData.FrontendData.Port
 }
 
 func (tc *MuxTunnelClient) addBackendConnection() error {
@@ -163,7 +178,7 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 
 	log.Debugf("Added backend connection [%s] with tunnel info: [%v]", conn.LocalAddr().String(), tc.tunnelData)
 
-	// Accept a stream
+	// Accept a new stream
 	go func() {
 		for {
 			stream, err := session.Accept()
@@ -175,6 +190,27 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 			go tc.handleStream(session, stream)
 		}
 	}()
+
+	in := json.NewDecoder(stream)
+
+	var tdr TunnelDataResponse
+	err = in.Decode(&tdr)
+	if err != nil {
+		err := fmt.Errorf("failed to deserialize tunnel info [%s]", err.Error())
+		log.Error(err.Error())
+		return err
+	}
+
+	if tdr.Error != "" {
+		err := fmt.Errorf("Tunnel failed to setup frontend: [%s] => [%s]", tdr.ServiceName, tdr.Error)
+		log.Error(err.Error())
+		return err
+	}
+
+	tc.mtx.Lock()
+	tc.tunnelData.FrontendData.Port = tdr.FrontendPort
+	tc.mtx.Unlock()
+	log.Infof("Tunnel ready on frontend: [%s] => [%s:%d]", tdr.ServiceName, tc.apiEndpoint, tdr.FrontendPort)
 
 	// check for closed session (closed/keepalive failed/etc) or shutdown
 loop:

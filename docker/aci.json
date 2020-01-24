@@ -19,14 +19,28 @@
   
           ,"port": {
             "type": "string",
-            "defaultValue": "9999",
+            "defaultValue": "9000",
             "metadata": {
               "description": "API endpoint port"
             }
           }
+          ,"httpport": {
+            "type": "string",
+            "defaultValue": "9001",
+            "metadata": {
+              "description": "HTTP endpoint port"
+            }
+          }
+          ,"natsport": {
+            "type": "string",
+            "defaultValue": "9002",
+            "metadata": {
+              "description": "NATS endpoint port"
+            }
+          }
           ,"token": {
             "type": "string",
-            "defaultValue": "",
+            "defaultValue": "supersecret",
             "metadata": {
                 "description": "shared secret for authorization"
             }
@@ -54,28 +68,28 @@
         }
         ,"portserv1": {
             "type": "string",
-            "defaultValue": "8888",
+            "defaultValue": "8000",
             "metadata": {
               "description": "service port 1"
             }
           }
           ,"portserv2": {
             "type": "string",
-            "defaultValue": "8889",
+            "defaultValue": "8001",
             "metadata": {
               "description": "service port 1"
             }
           }
           ,"portserv3": {
             "type": "string",
-            "defaultValue": "8890",
+            "defaultValue": "8002",
             "metadata": {
               "description": "service port 1"
             }
           }
           ,"portserv4": {
             "type": "string",
-            "defaultValue": "8891",
+            "defaultValue": "8003",
             "metadata": {
               "description": "service port 1"
             }
@@ -98,8 +112,16 @@
                             "image": "[parameters('containerImageName')]",
                             "environmentVariables": [
                                 {
-                                    "name": "PORT",
-                                    "value": "[parameters('port')]"
+                                  "name": "PORT",
+                                  "value": "[parameters('port')]"
+                                },
+                                {
+                                  "name": "HTTP_PORT",
+                                  "value": "[parameters('httpport')]"
+                                },
+                                {
+                                  "name": "NATS_PORT",
+                                  "value": "[parameters('natsport')]"
                                 },
                                 {
                                     "name": "LOGLEVEL",
@@ -126,7 +148,13 @@
                             },
                             "ports": [
                                 {
-                                    "port": "[parameters('port')]"
+                                  "port": "[parameters('port')]"
+                                }
+                                ,{
+                                  "port": "[parameters('httpport')]"
+                                }
+                                ,{
+                                  "port": "[parameters('natsport')]"
                                 }
                                 ,{
                                     "port": "[parameters('portserv1')]"
@@ -152,6 +180,14 @@
                       {
                         "protocol": "tcp",
                         "port": "[parameters('port')]"
+                      }
+                      ,{
+                        "protocol": "tcp",
+                        "port": "[parameters('httpport')]"
+                      }
+                      ,{
+                        "protocol": "tcp",
+                        "port": "[parameters('natsport')]"
                       }
                       ,{
                         "protocol": "tcp",

@@ -10,6 +10,7 @@ import (
 
 	tunnel "github.com/dariopb/goreverselb/pkg"
 	"github.com/dariopb/goreverselb/pkg/certHelper"
+	"github.com/dariopb/goreverselb/pkg/restapi"
 
 	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
@@ -44,7 +45,9 @@ func main() {
 	//pubsub.NewNatsServer(*cert, port, "1234")
 	//<-c
 	//tunnel.NewTunnelService(*cert, port, "1234")
-	tunnel.NewMuxTunnelService(*cert, port, "1234")
+	ts, _ := tunnel.NewMuxTunnelService(*cert, port, "1234")
+
+	restapi.NewRestApi(*cert, 7777, "1234", ts)
 
 	time.Sleep(1 * time.Second)
 
@@ -53,7 +56,7 @@ func main() {
 		Token:                "1234",
 		BackendAcceptBacklog: 1,
 		FrontendData: tunnel.FrontendData{
-			Port: 8888,
+			Port: 0,
 		},
 		TargetPort:      80,
 		TargetAddresses: []string{"www.google.com"},
@@ -63,13 +66,14 @@ func main() {
 		ServiceName: "web7777",
 		Token:       "12345",
 		FrontendData: tunnel.FrontendData{
-			Port: 7777,
+			Port: 0,
 		},
 		TargetPort:      80,
 		TargetAddresses: []string{"www.microsoft.com"},
 	}
 
 	tc, _ := tunnel.NewMuxTunnelClient("localhost:9999", td)
+	time.Sleep(10 * time.Second)
 	tunnel.NewMuxTunnelClient("localhost:9999", td1)
 
 	time.Sleep(10000 * time.Second)
