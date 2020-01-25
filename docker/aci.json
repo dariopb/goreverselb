@@ -38,6 +38,21 @@
               "description": "NATS endpoint port"
             }
           }
+          ,"dynport": {
+            "type": "string",
+            "defaultValue": "8000",
+            "metadata": {
+              "description": "Dynamic frontend port start"
+            }
+          }
+          ,"dynportcount": {
+            "type": "string",
+            "defaultValue": "4",
+            "metadata": {
+              "description": "Dynamic frontend port count"
+            }
+          }
+
           ,"token": {
             "type": "string",
             "defaultValue": "supersecret",
@@ -123,6 +138,15 @@
                                   "name": "NATS_PORT",
                                   "value": "[parameters('natsport')]"
                                 },
+                                {
+                                  "name": "DYN_FRONTEND_PORT",
+                                  "value": "[parameters('dynport')]"
+                                },
+                                {
+                                  "name": "DYN_FRONTEND_PORT_COUNT",
+                                  "value": "[parameters('dynportcount')]"
+                                },
+
                                 {
                                     "name": "LOGLEVEL",
                                     "value": "[parameters('loglevel')]"

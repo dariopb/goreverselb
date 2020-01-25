@@ -38,6 +38,7 @@ var insecuretls bool
 var servicename string
 var token string
 var frontendport int
+var dynport, dynportcount int
 
 var banner = `
                                   _     ____  
@@ -113,6 +114,22 @@ func main() {
 						Usage:       "port for the secure NATS endpoint (server will be disabled if not provided)",
 						EnvVars:     []string{"NATS_PORT"},
 						Destination: &natsport,
+						Required:    false,
+					},
+					&cli.IntFlag{
+						Name:        "dynport",
+						Value:       8000,
+						Usage:       "dynamic frontend port base",
+						EnvVars:     []string{"DYN_FRONTEND_PORT"},
+						Destination: &dynport,
+						Required:    false,
+					},
+					&cli.IntFlag{
+						Name:        "dynportcount",
+						Value:       100,
+						Usage:       "number of dynamic frontend ports",
+						EnvVars:     []string{"DYN_FRONTEND_PORT_COUNT"},
+						Destination: &dynportcount,
 						Required:    false,
 					},
 				},
@@ -203,7 +220,7 @@ func server(ctx *cli.Context) error {
 		log.Fatalf("failed to create tls certificate: ", err)
 	}
 
-	ts, err := tunnel.NewMuxTunnelService(*cert, port, token)
+	ts, err := tunnel.NewMuxTunnelService(*cert, port, token, dynport, dynportcount)
 	if err != nil {
 		log.Fatalf("failed to start new tunnel service: ", err)
 	}

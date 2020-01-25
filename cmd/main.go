@@ -45,7 +45,7 @@ func main() {
 	//pubsub.NewNatsServer(*cert, port, "1234")
 	//<-c
 	//tunnel.NewTunnelService(*cert, port, "1234")
-	ts, _ := tunnel.NewMuxTunnelService(*cert, port, "1234")
+	ts, _ := tunnel.NewMuxTunnelService(*cert, port, "1234", 8000, 1)
 
 	restapi.NewRestApi(*cert, 7777, "1234", ts)
 
@@ -64,7 +64,7 @@ func main() {
 
 	td1 := tunnel.TunnelData{
 		ServiceName: "web7777",
-		Token:       "12345",
+		Token:       "1234",
 		FrontendData: tunnel.FrontendData{
 			Port: 0,
 		},
@@ -73,11 +73,14 @@ func main() {
 	}
 
 	tc, _ := tunnel.NewMuxTunnelClient("localhost:9999", td)
+
+	time.Sleep(1 * time.Second)
+	tc.Close()
+
 	time.Sleep(10 * time.Second)
 	tunnel.NewMuxTunnelClient("localhost:9999", td1)
 
 	time.Sleep(10000 * time.Second)
-	tc.Close()
 
 	td.FrontendData.Port = 7777
 	tc, _ = tunnel.NewMuxTunnelClient("localhost:9999", td)

@@ -38,7 +38,7 @@ func (p *PoolInts) GetElement() (int, error) {
 	v := p.buckets[p.head]
 	p.head = (p.head + 1) % len(p.buckets)
 
-	log.Debug("Pool GetElement: [%d] => (%d:%d)", v, p.head, p.tail)
+	log.Debugf("Pool GetElement: [%d] => (%d:%d)", v, p.head, p.tail)
 
 	p.mtx.Unlock()
 	return v, nil
@@ -54,7 +54,7 @@ func (p *PoolInts) ReturnElement(v int) error {
 	p.buckets[p.tail] = v
 	p.tail = (p.tail + 1) % len(p.buckets)
 
-	log.Debug("Pool ReturnElement: [%d] => (%d:%d)", v, p.head, p.tail)
+	log.Debugf("Pool ReturnElement: [%d] => (%d:%d)", v, p.head, p.tail)
 
 	p.mtx.Unlock()
 	return nil

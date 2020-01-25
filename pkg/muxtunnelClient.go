@@ -184,7 +184,7 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 			stream, err := session.Accept()
 			if err != nil {
 				log.Info("tunnel client service session accept error", err)
-				return
+				break
 			}
 
 			go tc.handleStream(session, stream)

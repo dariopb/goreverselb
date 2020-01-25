@@ -37,7 +37,7 @@ type TunnelFrontendServices struct {
 }
 
 // NewMuxTunnelService creates a new tunnel service on the port using the passed cert
-func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string) (*MuxTunnelService, error) {
+func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string, dynport int, dymportcount int) (*MuxTunnelService, error) {
 	ts := MuxTunnelService{
 		port:        servicePort,
 		token:       token,
@@ -45,7 +45,7 @@ func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string) (*
 		closeCh:     make(chan bool),
 	}
 
-	ts.frontendPortPool = NewPoolForRange(8000, 100)
+	ts.frontendPortPool = NewPoolForRange(dynport, dymportcount)
 
 	tlsconfig := &tls.Config{Certificates: []tls.Certificate{cert}}
 	listener, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", ts.port), tlsconfig)
@@ -60,6 +60,7 @@ func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string) (*
 			conn, err := listener.Accept()
 			if err != nil {
 				log.Info("tunnel service  accept error", err)
+				break
 			}
 
 			go ts.handleMuxConnection(conn)
@@ -259,7 +260,7 @@ func (ts *MuxTunnelService) startFrontend(serviceName string, fed *FrontendData)
 			conn, err := listener.Accept()
 			if err != nil {
 				log.Errorf("frontend [%s] on port [%d] listener error: [%s]", serviceName, fed.Port, err.Error())
-				return
+				break
 			}
 
 			go ts.doProxy(serviceName, conn)
