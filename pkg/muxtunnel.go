@@ -326,12 +326,14 @@ func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
 	// Connect the service to relay to
 	backConn, err := ts.connectBackend(session, conn, serviceName)
 	if err != nil {
-
+		ts.mtx.Lock()
+		return
 	}
 
 	// Send the first leg that I saved
 	l, err := backConn.Write((b[:n]))
 	if l != n || err != nil {
+		ts.mtx.Lock()
 		backConn.Close()
 		return
 	}

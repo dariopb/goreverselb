@@ -110,9 +110,6 @@
             }
           }
     },
-    "variables": {
-        "reverselbimage": "dariob/reverselb-alpine:0.1"
-    },
     "resources": [
         {
             "name": "[parameters('containerGroupName')]",
