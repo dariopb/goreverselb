@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type MuxTunnelClient struct {
 func NewMuxTunnelClient(apiEndpoint string, td TunnelData) (*MuxTunnelClient, error) {
 	log.Infof("NewTunnelClient to apiEndpoint [%s] with tunnel info: [%v]", apiEndpoint, td)
 
+	rand.Seed(time.Now().UnixNano())
 	roots := x509.NewCertPool()
 	//ok := roots.AppendCertsFromPEM([]byte(rootCert))
 	//if !ok {
@@ -229,11 +231,11 @@ loop:
 }
 
 func (tc *MuxTunnelClient) handleStream(session *yamux.Session, conn net.Conn) {
-	log.Infof("session: [%s], new stream connection from: %s", session.LocalAddr().String(), conn.LocalAddr().String())
+	log.Debugf("session: [%s], new stream connection from: %s", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
 
 	defer func() {
 		conn.Close()
-		log.Infof("session: [%s], stream from [%s] ended", session.LocalAddr().String(), conn.LocalAddr().String())
+		log.Infof("session: [%s], stream from [%s] ended", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
 	}()
 
 	b, payloadLen, err := readFrame(conn)
@@ -250,12 +252,10 @@ func (tc *MuxTunnelClient) handleStream(session *yamux.Session, conn net.Conn) {
 		return
 	}
 
-	log.Debugf("Got new backend connection info: [%v]", td)
+	log.Infof("session: [%s], new stream connection from: [%s] via [%s]", td.ServiceName, td.SourceAddress, conn.RemoteAddr().String())
 
-	if len(tc.tunnelData.TargetAddresses) > 0 {
-		err = tc.doProxy(conn)
-		if err == nil {
-		}
+	err = tc.doProxy(conn)
+	if err == nil {
 	}
 }
 
@@ -263,21 +263,27 @@ func (tc *MuxTunnelClient) doProxy(conn net.Conn) error {
 	var addr string
 	tc.mtx.Lock()
 
-	// #DARIO TODO: do lb to the backends
-	addr = tc.tunnelData.TargetAddresses[0]
+	// Pick a random backend
+	l := len(tc.tunnelData.TargetAddresses)
+	if l == 0 {
+		tc.mtx.Unlock()
+		return nil
+	}
+
+	addr = tc.tunnelData.TargetAddresses[rand.Intn(l)]
 	tc.mtx.Unlock()
 
 	addr = fmt.Sprintf("%s:%d", addr, tc.tunnelData.TargetPort)
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		log.Errorf("failed to resolve server [%s]: %s", tcpAddr.String(), err.Error())
+		log.Errorf("session: [%s], failed to resolve server [%s]: %s", tc.tunnelData.ServiceName, tcpAddr.String(), err.Error())
 		return err
 	}
 
 	d := net.Dialer{Timeout: tc.dialerTimeout}
 	backConn, err := d.Dial("tcp", tcpAddr.String())
 	if err != nil {
-		log.Errorf("failed to connect to [%s]: %s", tcpAddr.String(), err.Error())
+		log.Errorf("session: [%s], failed to connect to [%s]: %s", tc.tunnelData.ServiceName, tcpAddr.String(), err.Error())
 		return err
 	}
 

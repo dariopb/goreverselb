@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -38,6 +39,8 @@ type TunnelFrontendServices struct {
 
 // NewMuxTunnelService creates a new tunnel service on the port using the passed cert
 func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string, dynport int, dymportcount int) (*MuxTunnelService, error) {
+	rand.Seed(time.Now().UnixNano())
+
 	ts := MuxTunnelService{
 		port:        servicePort,
 		token:       token,
@@ -303,8 +306,19 @@ func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
 	var session *yamux.Session
 	var id string
 
+	// Pick a random backend
+	l := len(frontend.backendConnMap)
+	if l == 0 {
+		log.Errorf("frontend [%s:%s from %s] couldn't find any backend endpoint to proxy to", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
+		return
+	}
+
+	i := rand.Intn(l)
 	for id, session = range frontend.backendConnMap {
-		break
+		if i == 0 {
+			break
+		}
+		i = i - 1
 	}
 
 	if id == "" {
@@ -331,7 +345,7 @@ func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
 	}
 
 	// Send the first leg that I saved
-	l, err := backConn.Write((b[:n]))
+	l, err = backConn.Write((b[:n]))
 	if l != n || err != nil {
 		ts.mtx.Lock()
 		backConn.Close()
@@ -368,7 +382,7 @@ func (ts *MuxTunnelService) connectBackend(session *yamux.Session, conn net.Conn
 
 	tunnelConnect := TunnelConnecData{
 		ServiceName:   serviceName,
-		SourceAddress: session.RemoteAddr().String(),
+		SourceAddress: conn.RemoteAddr().String(),
 	}
 	err = sendSerializedObject(backConn, tunnelConnect)
 	if err != nil {
