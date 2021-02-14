@@ -40,6 +40,10 @@ func client(ctx *cli.Context) error {
 		log.Fatalf("wrong format for endpoint: ", err)
 	}
 
+	if len(instancename) > 0 {
+		servicename = servicename + ":" + instancename
+	}
+
 	td := tunnel.TunnelData{
 		ServiceName:          servicename,
 		Token:                token,

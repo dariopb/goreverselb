@@ -178,7 +178,7 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 		return err
 	}
 
-	log.Debugf("Added backend connection [%s] with tunnel info: [%v]", conn.LocalAddr().String(), tc.tunnelData)
+	log.Infof("Added backend connection [%s] with tunnel info: [%v]", conn.LocalAddr().String(), tc.tunnelData)
 
 	// Accept a new stream
 	go func() {
@@ -235,7 +235,7 @@ func (tc *MuxTunnelClient) handleStream(session *yamux.Session, conn net.Conn) {
 
 	defer func() {
 		conn.Close()
-		log.Infof("session: [%s], stream from [%s] ended", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
+		log.Debugf("session: [%s], stream from [%s] ended", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
 	}()
 
 	b, payloadLen, err := readFrame(conn)
@@ -252,7 +252,7 @@ func (tc *MuxTunnelClient) handleStream(session *yamux.Session, conn net.Conn) {
 		return
 	}
 
-	log.Infof("session: [%s], new stream connection from: [%s] via [%s]", td.ServiceName, td.SourceAddress, conn.RemoteAddr().String())
+	log.Debugf("session: [%s], new stream connection from: [%s] via [%s]", td.ServiceName, td.SourceAddress, conn.RemoteAddr().String())
 
 	err = tc.doProxy(conn)
 	if err == nil {

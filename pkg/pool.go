@@ -8,54 +8,62 @@ import (
 )
 
 type PoolInts struct {
-	buckets []int
-	head    int
-	tail    int
+	free      map[int]bool
+	allocated map[int]bool
+	tail      int
 
 	mtx sync.Mutex
 }
 
 func NewPoolForRange(lowerBound, cap int) *PoolInts {
 	p := &PoolInts{
-		buckets: make([]int, cap+1),
-		head:    0,
-		tail:    cap,
+		free:      make(map[int]bool),
+		allocated: make(map[int]bool),
 	}
 	for i := 0; i < cap; i = i + 1 {
-		p.buckets[i] = lowerBound + i
+		p.free[lowerBound+i] = true
 	}
 
 	return p
 }
 
-func (p *PoolInts) GetElement() (int, error) {
+func (p *PoolInts) GetElement(v int) (int, error) {
 	p.mtx.Lock()
+	defer p.mtx.Unlock()
 
-	if p.head == p.tail {
-		p.mtx.Unlock()
+	if len(p.free) == 0 {
 		return 0, fmt.Errorf("No more elements available")
 	}
-	v := p.buckets[p.head]
-	p.head = (p.head + 1) % len(p.buckets)
 
-	log.Debugf("Pool GetElement: [%d] => (%d:%d)", v, p.head, p.tail)
+	if v == 0 {
+		for k := range p.free {
+			v = k
+			break
+		}
+	} else {
+		if ok, _ := p.free[v]; !ok {
+			return 0, fmt.Errorf("Explicit element not available")
+		}
+	}
 
-	p.mtx.Unlock()
+	delete(p.free, v)
+	p.allocated[v] = true
+
+	log.Debugf("Pool GetElement: [%d] => (free: %d)", v, len(p.free))
+
 	return v, nil
 }
 
 func (p *PoolInts) ReturnElement(v int) error {
 	p.mtx.Lock()
+	defer p.mtx.Unlock()
 
-	if p.tail == (p.head+1)%len(p.buckets) {
-		p.mtx.Unlock()
-		return fmt.Errorf("Capacity exceeded")
+	if ok, _ := p.allocated[v]; ok {
+		delete(p.allocated, v)
+		p.free[v] = true
 	}
-	p.buckets[p.tail] = v
-	p.tail = (p.tail + 1) % len(p.buckets)
 
-	log.Debugf("Pool ReturnElement: [%d] => (%d:%d)", v, p.head, p.tail)
+	log.Debugf("Pool ReturnElement: [%d] => (free:%d)", len(p.free))
 
-	p.mtx.Unlock()
 	return nil
 }
