@@ -10,6 +10,7 @@ import (
 
 	tunnel "github.com/dariopb/goreverselb/pkg"
 	"github.com/dariopb/goreverselb/pkg/certHelper"
+	"github.com/dariopb/goreverselb/pkg/helpers"
 	pubsub "github.com/dariopb/goreverselb/pkg/pubsub"
 	restapi "github.com/dariopb/goreverselb/pkg/restapi"
 	version "github.com/dariopb/goreverselb/version"
@@ -242,12 +243,30 @@ func server(ctx *cli.Context) error {
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
 
+	// Initialize/retrieve the persistent runtime data
+	configData := &tunnel.ConfigData{}
+	store, err := helpers.NewAppData("user_store.yaml")
+	store.LoadConfig(configData, false, func() (interface{}, error) {
+		configData.Users = map[string]*tunnel.UserData{
+			tunnel.DefaultUserID: {UserID: "default@none",
+				AllowedSources: "*"},
+		}
+
+		return configData, nil
+	})
+	if err != nil {
+		log.Fatal("failed to load user configuration: ", err)
+	}
+
+	configData.Users[tunnel.DefaultUserID].Token = token
+	store.Save()
+
 	cert, err := certHelper.CreateDynamicTlsCertWithKey(autocertsubjectname)
 	if err != nil {
 		log.Fatalf("failed to create tls certificate: ", err)
 	}
 
-	ts, err := tunnel.NewMuxTunnelService(*cert, port, token, dynport, dynportcount)
+	ts, err := tunnel.NewMuxTunnelService(configData, *cert, port, token, dynport, dynportcount)
 	if err != nil {
 		log.Fatalf("failed to start new tunnel service: ", err)
 	}

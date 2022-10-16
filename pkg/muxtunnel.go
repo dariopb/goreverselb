@@ -33,11 +33,12 @@ type muxfrontendRuntimeData struct {
 }
 
 type MuxTunnelService struct {
-	port  int
-	token string
+	port       int
+	token      string
+	configData *ConfigData
 
 	frontendPortPool *PoolInts
-	frontendMap      map[string]*muxfrontendRuntimeData
+	frontendMap      map[string]map[string]*muxfrontendRuntimeData
 	mtx              sync.Mutex
 	closeCh          chan bool
 }
@@ -49,14 +50,20 @@ type TunnelFrontendServices struct {
 }
 
 // NewMuxTunnelService creates a new tunnel service on the port using the passed cert
-func NewMuxTunnelService(cert tls.Certificate, servicePort int, token string, dynport int, dymportcount int) (*MuxTunnelService, error) {
+func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePort int, token string, dynport int, dymportcount int) (*MuxTunnelService, error) {
 	rand.Seed(time.Now().UnixNano())
 
 	ts := MuxTunnelService{
 		port:        servicePort,
 		token:       token,
-		frontendMap: make(map[string]*muxfrontendRuntimeData),
+		configData:  configData,
+		frontendMap: make(map[string]map[string]*muxfrontendRuntimeData),
 		closeCh:     make(chan bool),
+	}
+
+	// create the frontendMap for the defined users
+	for _, u := range configData.Users {
+		ts.frontendMap[u.UserID] = make(map[string]*muxfrontendRuntimeData)
 	}
 
 	ts.frontendPortPool = NewPoolForRange(dynport, dymportcount)
@@ -89,11 +96,11 @@ func (ts *MuxTunnelService) Close() {
 	close(ts.closeCh)
 }
 
-func (ts *MuxTunnelService) GetServices() map[string]TunnelFrontendServices {
+func (ts *MuxTunnelService) GetServices(userID string) map[string]TunnelFrontendServices {
 	srvs := make(map[string]TunnelFrontendServices)
 	ts.mtx.Lock()
 
-	for _, val := range ts.frontendMap {
+	for _, val := range ts.frontendMap[userID] {
 		srvs[val.serviceName] = TunnelFrontendServices{
 			Name:    val.serviceName,
 			Port:    val.port,
@@ -155,8 +162,9 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		return
 	}
 
-	if td.Token != ts.token {
-		err := fmt.Errorf("stream: [%s] authorization failed, wrong token value", td.ServiceName)
+	userID, serviceName, instanceName := ts.parseServiceContext(&td)
+	if !ts.authorize(userID, serviceName, &td) {
+		err := fmt.Errorf("stream: [%s] authorization failed, token presented is not valid", td.ServiceName)
 		log.Error(err.Error())
 
 		ts.sendResponse(&td, out, err)
@@ -164,16 +172,9 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 	}
 
 	// Everything is alright, start the frontend if needed
-	instanceName := ""
-	serviceParts := strings.Split(td.ServiceName, ":")
-	if len(serviceParts) > 1 {
-		instanceName = serviceParts[1]
-	}
-	serviceName := serviceParts[0]
-
 	ts.mtx.Lock()
 	var val *muxfrontendRuntimeData
-	val, _ = ts.frontendMap[serviceName]
+	val, _ = ts.frontendMap[userID][serviceName]
 
 	// check dynamic port condition
 	if val != nil {
@@ -203,7 +204,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		}
 
 		// Create the frontend...
-		val, err = ts.startFrontend(serviceName, instanceName, &td)
+		val, err = ts.startFrontend(userID, serviceName, instanceName, &td)
 		if err != nil {
 			ts.frontendPortPool.ReturnElement(td.FrontendData.Port)
 
@@ -212,7 +213,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 			return
 		}
 
-		ts.frontendMap[serviceName] = val
+		ts.frontendMap[userID][serviceName] = val
 	}
 
 	if _, ok := val.backendConnMap[instanceName]; !ok {
@@ -250,12 +251,54 @@ loop:
 
 	if len(val.backendConnMap) == 0 {
 		val.listener.Close()
-		delete(ts.frontendMap, serviceName)
+		if fem, ok := ts.frontendMap[userID]; ok {
+			delete(fem, serviceName)
+		}
 	}
 	ts.mtx.Unlock()
 
 	log.Debugf("session: [%s] finished: service: [%s:%s], listen port: [%d]",
 		session.RemoteAddr().String(), serviceName, instanceName, td.FrontendData.Port)
+}
+
+func (ts *MuxTunnelService) parseServiceContext(td *TunnelData) (userID, serviceName, instanceName string) {
+	instanceName = ""
+	parts := strings.Split(td.ServiceName, ":")
+	if len(parts) > 1 {
+		instanceName = parts[1]
+	}
+	serviceName = parts[0]
+
+	userID = DefaultUserID
+	parts = strings.Split(td.Token, ":")
+	if len(parts) > 1 {
+		userID = parts[0]
+	}
+
+	return userID, serviceName, instanceName
+}
+
+func (ts *MuxTunnelService) authorize(userID, serviceName string, td *TunnelData) bool {
+	authorized := false
+
+	ts.mtx.Lock()
+	u, ok := ts.configData.Users[userID]
+	if ok {
+		s, ok := u.Services[serviceName]
+		if ok {
+			if td.Token == s.Token {
+				authorized = true
+			}
+		} else {
+			if td.Token == u.Token {
+				authorized = true
+			}
+		}
+	}
+
+	ts.mtx.Unlock()
+
+	return authorized
 }
 
 func (ts *MuxTunnelService) sendResponse(td *TunnelData, out *json.Encoder, operror error) error {
@@ -273,7 +316,7 @@ func (ts *MuxTunnelService) sendResponse(td *TunnelData, out *json.Encoder, oper
 	return err
 }
 
-func (ts *MuxTunnelService) startFrontend(serviceName string, instanceName string, td *TunnelData) (*muxfrontendRuntimeData, error) {
+func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, instanceName string, td *TunnelData) (*muxfrontendRuntimeData, error) {
 	fed := &td.FrontendData
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", fed.Port))
 	if err != nil {
@@ -291,7 +334,7 @@ func (ts *MuxTunnelService) startFrontend(serviceName string, instanceName strin
 				break
 			}
 
-			go ts.doProxy(serviceName, conn)
+			go ts.doProxy(userID, serviceName, conn)
 		}
 
 		ts.frontendPortPool.ReturnElement(fed.Port)
@@ -308,12 +351,22 @@ func (ts *MuxTunnelService) startFrontend(serviceName string, instanceName strin
 	return &frontendRuntime, err
 }
 
-func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
+func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 	log.Debugf("frontend [%s:%s from %s] new connection", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
 
 	defer func() {
 		conn.Close()
 	}()
+
+	// Validate if a connection comes from the allowed range of IPs
+	//ts.mtx.Lock()
+	//u, ok := ts.configData.Users[userID]
+	//if ok {
+	//	s, ok := u.Services[serviceName]
+	//	if ok {
+	//	}
+	//}
+	//ts.mtx.Unlock()
 
 	instanceName, b, err := ts.getSNITarget(serviceName, conn)
 	if err != nil {
@@ -328,7 +381,10 @@ func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
 
 	// pick a backend connection to proxy everything there
 	ts.mtx.Lock()
-	frontend, _ := ts.frontendMap[serviceName]
+	var frontend *muxfrontendRuntimeData = nil
+	if fem, ok := ts.frontendMap[userID]; ok {
+		frontend, _ = fem[serviceName]
+	}
 	if frontend == nil {
 		ts.mtx.Unlock()
 		log.Errorf("frontend [%s:%s from %s] couldn't find any frontend connection definition", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
@@ -341,7 +397,7 @@ func (ts *MuxTunnelService) doProxy(serviceName string, conn net.Conn) {
 	bcm, _ := frontend.backendConnMap[instanceName]
 	if bcm == nil {
 		ts.mtx.Unlock()
-		log.Errorf("frontend [%s:%s from %s] couldn't find any frontend connection definition for instance: [%s]", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), instanceName)
+		log.Errorf("frontend [%s:%s from %s] couldn't find any backend connection definition for instance: [%s]", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), instanceName)
 		return
 	}
 

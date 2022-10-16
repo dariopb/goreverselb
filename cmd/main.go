@@ -45,7 +45,16 @@ func main() {
 	//pubsub.NewNatsServer(*cert, port, "1234")
 	//<-c
 	//tunnel.NewTunnelService(*cert, port, "1234")
-	ts, _ := tunnel.NewMuxTunnelService(*cert, port, "1234", 8000, 2)
+	configData := &tunnel.ConfigData{
+		Users: map[string]*tunnel.UserData{
+			"": {UserID: "default@none",
+				AllowedSources: "*"},
+			"dario@dd.com": {UserID: "dario@dd.com",
+				AllowedSources: "*"},
+		},
+	}
+
+	ts, _ := tunnel.NewMuxTunnelService(configData, *cert, port, "1234", 8000, 2)
 
 	restapi.NewRestApi(*cert, 7777, "1234", ts)
 
@@ -53,7 +62,7 @@ func main() {
 
 	td := tunnel.TunnelData{
 		ServiceName:          "web8888",
-		Token:                "1234",
+		Token:                "dario@dd.com:1234",
 		BackendAcceptBacklog: 1,
 		FrontendData: tunnel.FrontendData{
 			Port: 8000,
@@ -73,8 +82,8 @@ func main() {
 	}
 
 	tc, _ := tunnel.NewMuxTunnelClient("localhost:9999", td)
-	time.Sleep(1 * time.Second)
-	_, _ = tunnel.NewMuxTunnelClient("localhost:9999", td1)
+	//	time.Sleep(1 * time.Second)
+	//	_, _ = tunnel.NewMuxTunnelClient("localhost:9999", td1)
 
 	time.Sleep(10000000 * time.Second)
 	tc.Close()
