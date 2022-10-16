@@ -88,7 +88,7 @@ func (api *RestAPI) getServices(c echo.Context) error {
 	name := c.Param("name")
 	var ret interface{}
 
-	services := api.ts.GetServices()
+	services := api.ts.GetServices(tunnel.DefaultUserID)
 	ret = services
 	if name != "" {
 		for k, v := range services {

@@ -12,6 +12,27 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var DefaultUserID string = ""
+
+type ConfigData struct {
+	Users map[string]*UserData `yaml:"users" json:"users"`
+}
+type UserData struct {
+	UserID   string                  `yaml:"userId" json:"userId"`
+	Token    string                  `yaml:"token" json:"token"`
+	Role     string                  `yaml:"role" json:"role"`
+	Services map[string]*ServiceData `yaml:"services" json:"services"`
+
+	AllowedSources string `yaml:"allowedSources" json:"allowedSources"`
+}
+
+type ServiceData struct {
+	ServiceAndInstanceName string `yaml:"serviceAndInstanceName" json:"serviceAndInstanceName"`
+	Token                  string `yaml:"token" json:"token"`
+	AllowedSources         string `yaml:"allowedSources" json:"allowedSources"`
+	Persistent             bool   `yaml:"persistent" json:"persistent"`
+}
+
 type backendRuntimeData struct {
 	conn         net.Conn
 	frontendConn net.Conn
@@ -31,10 +52,11 @@ type FrontendData struct {
 }
 
 type TunnelData struct {
-	ID           string       `yaml:"id" json:"id"`
-	ServiceName  string       `yaml:"serviceName" json:"serviceName"`
-	Token        string       `yaml:"token" json:"token"`
-	FrontendData FrontendData `yaml:"frontendData" json:"frontendData"`
+	ID             string       `yaml:"id" json:"id"`
+	ServiceName    string       `yaml:"serviceName" json:"serviceName"`
+	Token          string       `yaml:"token" json:"token"`
+	AllowedSources string       `yaml:"allowedSources" json:"allowedSources"`
+	FrontendData   FrontendData `yaml:"frontendData" json:"frontendData"`
 
 	BackendAcceptBacklog int
 	TargetPort           int

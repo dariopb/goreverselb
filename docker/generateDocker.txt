@@ -2,7 +2,7 @@ export GOPATH=/home/dario/go
 go get github.com/rakyll/statik
 
 go generate ./pkg/restapi
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v ./cmd/goreverselb
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -v ./cmd/goreverselb 
 
 
 

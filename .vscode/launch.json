@@ -15,7 +15,7 @@
                 "TOKEN" : "1234",
                 "PORT" : "9000",
                 "HTTP_PORT" : "9001",
-                "NATS_PORT" : "9002",
+                //"NATS_PORT" : "9002",
                 "AUTO_CERT_SUBJECT_NAME" : "localhost"
             },
             "args": [ "server" ]
