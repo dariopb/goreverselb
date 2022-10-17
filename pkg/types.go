@@ -12,7 +12,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var DefaultUserID string = ""
+var DefaultUserID string = "default@none"
+
+const (
+	ProxyString       string = "PROXY->"
+	HttpConnectString string = "CONNECT "
+)
 
 type ConfigData struct {
 	Users map[string]*UserData `yaml:"users" json:"users"`
@@ -47,8 +52,9 @@ type frontendRuntimeData struct {
 }
 
 type FrontendData struct {
-	Port int `yaml:"port" json:"port"`
-	auto bool
+	Port    int `yaml:"port" json:"port"`
+	auto    bool
+	TLSWrap bool `yaml:"tlsWrap" json:"tlsWrap"`
 }
 
 type TunnelData struct {

@@ -17,11 +17,11 @@ The client (either via the cmd line application, library or container orchestrat
 
 ## SNI/Host proxy loadbalancing
 
-The reverselb server will try to do protocol identification in order to get a possible SNI/Hostname style redirection on the same tunnel port (to be able to share the same service port with multiple service instances). The load balancing is done on serive instance names if multiple registrations for the same name/port are made.
+The reverselb server will try to do protocol identification in order to get a possible SNI/Hostname style redirection on the same tunnel port (to be able to share the same service port with multiple service instances). The load balancing is done on service instance names if multiple registrations for the same name/port are made.
 
 The currently supported protos are: 
 * HTTP **_connect_** protocol 
-* Custom HA-PROXY like protocol (**_PROXY->_[byte_len]_instanceName_**) 
+* Custom HA-PROXY like protocol (**_PROXY->_**[byte_len]**_instanceName_**[\n]) 
 * HTTP **_Host_** header _[not yet added]_
 * TLS ClientHello **_SNI_** extension
 
@@ -37,6 +37,8 @@ Using embedded proxy support (executable option _stdinproxy_):
 
 ```
 ssh dario@instancename -o "ProxyCommand=./goreverselb -l debug -t 0 stdinproxy -e localhost:8001"
+# using TLS wrapping
+ssh dario@instancename -o "ProxyCommand=./goreverselb -l debug -t 0 stdinproxy -e localhost:8000 --instancename %h -w -i"
 ```
 
 # Console application
@@ -98,6 +100,20 @@ OPTIONS:
    --help, -h                         show help (default: false)
 ```
 
+## Tunnel Group
+```
+NAME:
+   goreverselb tunnelgroup - creates multiple ingress tunnels
+
+USAGE:
+   goreverselb tunnelgroup [command options] [arguments...]
+
+OPTIONS:
+   --apiendpoint value, -e value   API endpoint in the form: hostname:port [%LB_API_ENDPOINT%]
+   --servicegroup value, -g value  service group json: like: '{"ssh1":{"name":"ssh1","ports":[{"port":8000,"protocol":"tcp","targetPort":22}],"backendIPs":["127.0.0.1"],"deleted":false}}' [%LB_SERVICE_GROUP_JSON%]
+   --help, -h                      show help (default: false)
+```
+
 ## Tunnel via SNI/Host
 ```
 NAME:
@@ -107,7 +123,10 @@ USAGE:
    goreverselb stdinproxy [command options] [arguments...]
 
 OPTIONS:
-   --serviceendpoint value, -e value  backend service address (hostname:port) [$SERVICE_ENDPOINT]
+   --serviceendpoint value, -e value  backend service address (hostname:port) [%SERVICE_ENDPOINT%]
+   --instancename value               instance name string (for SNI/Host functionality) (default: empty) [%INSTANCE_NAME%]
+   --wraptls, -w                      wrap the client connection on TLS (most likely the backend should be wrapped as well) (default: false) [%WRAP_TLS%]
+   --insecuretls, -i                  allow skip checking server CA/hostname (default: false) [%INSECURE_TLS%]
    --help, -h                         show help (default: false)
 ```
 

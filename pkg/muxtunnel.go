@@ -19,11 +19,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	proxyString     string = "PROXY->"
-	httpProxyString string = "CONNECT "
-)
-
 type muxfrontendRuntimeData struct {
 	serviceName    string
 	instanceName   string
@@ -39,6 +34,7 @@ type MuxTunnelService struct {
 
 	frontendPortPool *PoolInts
 	frontendMap      map[string]map[string]*muxfrontendRuntimeData
+	cert             tls.Certificate
 	mtx              sync.Mutex
 	closeCh          chan bool
 }
@@ -59,6 +55,7 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 		configData:  configData,
 		frontendMap: make(map[string]map[string]*muxfrontendRuntimeData),
 		closeCh:     make(chan bool),
+		cert:        cert,
 	}
 
 	// create the frontendMap for the defined users
@@ -68,7 +65,7 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 
 	ts.frontendPortPool = NewPoolForRange(dynport, dymportcount)
 
-	tlsconfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	tlsconfig := &tls.Config{Certificates: []tls.Certificate{ts.cert}}
 	listener, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", ts.port), tlsconfig)
 	if err != nil {
 		log.Fatal("tunnel service listener error:", err)
@@ -145,11 +142,16 @@ func (ts *MuxTunnelService) handleMuxConnection(conn net.Conn) {
 }
 
 func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) {
-	log.Debugf("session: [%s], new stream connection from: %s", session.RemoteAddr().String(), conn.RemoteAddr().String())
+	l := log.WithFields(log.Fields{
+		"session": session.RemoteAddr().String(),
+		"remote":  conn.RemoteAddr().String(),
+	})
+
+	l.Debugf("new stream connection")
 
 	defer func() {
 		conn.Close()
-		log.Debugf("stream connection from [%s] ended", conn.RemoteAddr().String())
+		l.Debug("connection ended")
 	}()
 
 	in := json.NewDecoder(conn)
@@ -158,18 +160,20 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 	var td TunnelData
 	err := in.Decode(&td)
 	if err != nil {
-		log.Errorf("failed to deserialize tunnel info [%s]", err.Error())
+		l.Errorf("failed to deserialize tunnel info [%s]", err.Error())
 		return
 	}
 
 	userID, serviceName, instanceName := ts.parseServiceContext(&td)
 	if !ts.authorize(userID, serviceName, &td) {
 		err := fmt.Errorf("stream: [%s] authorization failed, token presented is not valid", td.ServiceName)
-		log.Error(err.Error())
+		l.Error(err.Error())
 
 		ts.sendResponse(&td, out, err)
 		return
 	}
+
+	l = l.WithField("service", serviceName)
 
 	// Everything is alright, start the frontend if needed
 	ts.mtx.Lock()
@@ -188,7 +192,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		if err != nil {
 			ts.mtx.Unlock()
 			err := fmt.Errorf("stream: [%s] out of ports for automatic frontend allocation", serviceName)
-			log.Error(err.Error())
+			l.Error(err.Error())
 
 			ts.sendResponse(&td, out, err)
 			return
@@ -199,7 +203,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 
 	if val == nil || val.port != td.FrontendData.Port {
 		if val != nil && val.port != td.FrontendData.Port {
-			log.Infof("stream: [%s] closing listener [%s]", serviceName, val.listener.Addr().String())
+			l.Infof("service: [%s] closing listener [%s]", serviceName, val.listener.Addr().String())
 			val.listener.Close()
 		}
 
@@ -208,7 +212,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		if err != nil {
 			ts.frontendPortPool.ReturnElement(td.FrontendData.Port)
 
-			log.Errorf("stream [%s] error starting: [%s]", serviceName, err.Error())
+			l.Errorf("service [%s] error starting: [%s]", serviceName, err.Error())
 			ts.mtx.Unlock()
 			return
 		}
@@ -226,7 +230,7 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 	// Send the response so the client will get the endpoint info
 	err = ts.sendResponse(&td, out, nil)
 	if err != nil {
-		log.Errorf("failed to send tunnel response info [%s]", err.Error())
+		l.Errorf("failed to send tunnel response info [%s]", err.Error())
 		return
 	}
 
@@ -257,8 +261,8 @@ loop:
 	}
 	ts.mtx.Unlock()
 
-	log.Debugf("session: [%s] finished: service: [%s:%s], listen port: [%d]",
-		session.RemoteAddr().String(), serviceName, instanceName, td.FrontendData.Port)
+	l.Debugf("finished: service: [%s:%s], listen port: [%d]",
+		serviceName, instanceName, td.FrontendData.Port)
 }
 
 func (ts *MuxTunnelService) parseServiceContext(td *TunnelData) (userID, serviceName, instanceName string) {
@@ -318,23 +322,48 @@ func (ts *MuxTunnelService) sendResponse(td *TunnelData, out *json.Encoder, oper
 
 func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, instanceName string, td *TunnelData) (*muxfrontendRuntimeData, error) {
 	fed := &td.FrontendData
+
+	l := log.WithFields(log.Fields{
+		"frontend": serviceName,
+		"port":     fed.Port,
+	})
+
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", fed.Port))
 	if err != nil {
-		log.Errorf("frontend [%s] on port [%d] listener error: [%s]", serviceName, fed.Port, err.Error())
+		l.Errorf("listener error: [%s]", err.Error())
 		return nil, err
 	}
 
-	log.Infof("frontend [%s] listening on: %s", serviceName, listener.Addr().String())
+	l.Infof("Started listening")
 
 	go func() {
 		for {
+
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Errorf("frontend [%s] on port [%d] listener error: [%s]", serviceName, fed.Port, err.Error())
+				l.Errorf("accept error: [%s]", err.Error())
 				break
 			}
+			instancename := ""
 
-			go ts.doProxy(userID, serviceName, conn)
+			// If the service requested to always be wrapped over TLS (most likely HTTP traffic), do it.
+			if fed.TLSWrap {
+				l.Info("Upgrading frontend connection to TLS")
+				tlsconfig := &tls.Config{Certificates: []tls.Certificate{ts.cert}}
+				tlsconn := tls.Server(conn, tlsconfig)
+				err = tlsconn.Handshake()
+				if err != nil {
+					l.Errorf("TLS handshake error: [%s]", err.Error())
+					conn.Close()
+					continue
+				}
+
+				instancename = tlsconn.ConnectionState().ServerName
+				l.Infof("TLS wrap asks for instancename [%s]", instancename)
+				conn = tlsconn
+			}
+
+			go ts.doProxy(userID, serviceName, instancename, conn)
 		}
 
 		ts.frontendPortPool.ReturnElement(fed.Port)
@@ -351,8 +380,14 @@ func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, ins
 	return &frontendRuntime, err
 }
 
-func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
-	log.Debugf("frontend [%s:%s from %s] new connection", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
+func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName string, conn net.Conn) {
+	l := log.WithFields(log.Fields{
+		"frontend": serviceName,
+		"local":    conn.LocalAddr().String(),
+		"remote":   conn.RemoteAddr().String(),
+	})
+
+	l.Debugf("new connection")
 
 	defer func() {
 		conn.Close()
@@ -368,15 +403,19 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 	//}
 	//ts.mtx.Unlock()
 
-	instanceName, b, err := ts.getSNITarget(serviceName, conn)
-	if err != nil {
-		log.Debugf("frontend [%s:%s from %s] connection closed: %v", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), err)
-		return
-	}
+	var b []byte
+	var err error
 
+	if instanceName == "" {
+		instanceName, b, err = ts.getSNITarget(serviceName, conn)
+		if err != nil {
+			l.Debugf("getSNITarget failed: %v", err)
+			return
+		}
+	}
 	defer func() {
 		conn.Close()
-		log.Debugf("frontend [%s:%s from %s] connection closed", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
+		l.Debug("connection closed")
 	}()
 
 	// pick a backend connection to proxy everything there
@@ -387,7 +426,7 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 	}
 	if frontend == nil {
 		ts.mtx.Unlock()
-		log.Errorf("frontend [%s:%s from %s] couldn't find any frontend connection definition", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String())
+		l.Error("couldn't find any frontend connection definition")
 		return
 	}
 
@@ -397,19 +436,19 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 	bcm, _ := frontend.backendConnMap[instanceName]
 	if bcm == nil {
 		ts.mtx.Unlock()
-		log.Errorf("frontend [%s:%s from %s] couldn't find any backend connection definition for instance: [%s]", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), instanceName)
+		l.Errorf("couldn't find any backend connection definition for instance: [%s]", instanceName)
 		return
 	}
 
 	// Pick a random backend
-	l := len(bcm)
-	if l == 0 {
+	count := len(bcm)
+	if count == 0 {
 		ts.mtx.Unlock()
-		log.Errorf("frontend [%s:%s from %s] couldn't find any backend endpoint to proxy to for instance: %s", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), instanceName)
+		l.Errorf("couldn't find any backend endpoint to proxy to for instance: %s", instanceName)
 		return
 	}
 
-	i := rand.Intn(l)
+	i := rand.Intn(count)
 	for id, session = range bcm {
 		if i == 0 {
 			break
@@ -419,7 +458,7 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 
 	if id == "" {
 		ts.mtx.Unlock()
-		log.Errorf("frontend [%s:%s from %s] couldn't find any backend endpoint to proxy to for instance: %s", serviceName, conn.LocalAddr().String(), conn.RemoteAddr().String(), instanceName)
+		l.Errorf("couldn't find any backend endpoint to proxy to for instance: %s", instanceName)
 		return
 	}
 	ts.mtx.Unlock()
@@ -432,8 +471,8 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, conn net.Conn) {
 
 	// Send the first leg that I saved, if needed
 	if b != nil {
-		l, err = backConn.Write(b)
-		if l != len(b) || err != nil {
+		count, err = backConn.Write(b)
+		if count != len(b) || err != nil {
 			backConn.Close()
 			return
 		}
@@ -559,12 +598,12 @@ func (ts *MuxTunnelService) tryTLSDecode(b []byte) string {
 	return servername
 }
 
-// Try to decode a proxy payload in the form: "PROXY destinationString<cr>"
+// Try to decode a proxy payload in the form: "PROXY->LENinstancename<cr>"
 func (ts *MuxTunnelService) tryProxyDecode(b []byte) (string, int) {
 	s := cryptobyte.String(b)
 	dummy := []byte{}
 
-	if len(b) > 256 || !s.ReadBytes(&dummy, 7) || len(dummy) == 0 || string(dummy) != proxyString {
+	if len(b) > 256 || !s.ReadBytes(&dummy, 7) || len(dummy) == 0 || string(dummy) != ProxyString {
 		return "", 0
 	}
 
@@ -577,14 +616,14 @@ func (ts *MuxTunnelService) tryProxyDecode(b []byte) (string, int) {
 		return "", 0
 	}
 
-	return string(dummy), int(lenConsumed) + len(proxyString) + 1
+	return string(dummy), int(lenConsumed) + len(ProxyString) + 1
 }
 
 // Try to decode an HTTP proxy payload
 func (ts *MuxTunnelService) tryHTTPProxyDecode(b []byte, conn net.Conn) string {
 	r := bufio.NewReader(bytes.NewReader(b))
 
-	if connect, err := r.ReadString(' '); err != nil || connect != httpProxyString {
+	if connect, err := r.ReadString(' '); err != nil || connect != HttpConnectString {
 		return ""
 	}
 

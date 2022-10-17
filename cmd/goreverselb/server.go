@@ -36,6 +36,7 @@ var natsport int
 var lbapiendpoint string
 var serviceendpoint string
 var insecuretls bool
+var wraptls bool
 var servicename string
 var instancename string
 var token string
@@ -161,6 +162,15 @@ func main() {
 						Destination: &frontendport,
 						Required:    false,
 					},
+					&cli.BoolFlag{
+						Name:        "wraptls",
+						Aliases:     []string{"w"},
+						Value:       false,
+						Usage:       "always wrap the frontend connection as TLS (exposes HTTP backend as HTTPS endpoint)",
+						EnvVars:     []string{"WRAP_TLS"},
+						Destination: &wraptls,
+						Required:    false,
+					},
 
 					&cli.StringFlag{
 						Name:        "serviceendpoint",
@@ -215,6 +225,33 @@ func main() {
 						Destination: &serviceendpoint,
 						Required:    true,
 					},
+					&cli.StringFlag{
+						Name:        "instancename",
+						Value:       "",
+						DefaultText: "empty",
+						Usage:       "instance name string (for SNI/Host functionality)",
+						EnvVars:     []string{"INSTANCE_NAME"},
+						Destination: &instancename,
+						Required:    false,
+					},
+					&cli.BoolFlag{
+						Name:        "wraptls",
+						Aliases:     []string{"w"},
+						Value:       false,
+						Usage:       "wrap the client connection on TLS (most likely the backend should be wrapped as well)",
+						EnvVars:     []string{"WRAP_TLS"},
+						Destination: &wraptls,
+						Required:    false,
+					},
+					&cli.BoolFlag{
+						Name:        "insecuretls",
+						Aliases:     []string{"i"},
+						Value:       false,
+						Usage:       "allow skip checking server CA/hostname",
+						EnvVars:     []string{"INSECURE_TLS"},
+						Destination: &insecuretls,
+						Required:    false,
+					},
 				},
 			},
 		},
@@ -248,7 +285,7 @@ func server(ctx *cli.Context) error {
 	store, err := helpers.NewAppData("user_store.yaml")
 	store.LoadConfig(configData, false, func() (interface{}, error) {
 		configData.Users = map[string]*tunnel.UserData{
-			tunnel.DefaultUserID: {UserID: "default@none",
+			tunnel.DefaultUserID: {UserID: tunnel.DefaultUserID,
 				AllowedSources: "*"},
 		}
 
