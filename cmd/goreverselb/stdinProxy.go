@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"crypto/tls"
 	"io"
 	"net"
 	"os"
 	"time"
 
+	tunnel "github.com/dariopb/goreverselb/pkg"
 	"github.com/urfave/cli/v2"
 
 	log "github.com/sirupsen/logrus"
@@ -22,6 +25,10 @@ func stdinProxy(ctx *cli.Context) error {
 	})
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
+
+	if instancename == "" {
+		instancename = serviceendpoint
+	}
 
 	doProxy()
 
@@ -40,8 +47,38 @@ func doProxy() error {
 		return err
 	}
 
-	d := net.Dialer{Timeout: 5 * time.Second}
-	backConn, err := d.Dial("tcp", tcpAddr.String())
+	var backConn net.Conn
+
+	d := &net.Dialer{Timeout: 5 * time.Second}
+
+	if wraptls {
+		tlsconfig := &tls.Config{
+			InsecureSkipVerify: insecuretls,
+			ServerName:         instancename,
+		}
+
+		backConn, err = tls.DialWithDialer(d, "tcp", tcpAddr.String(), tlsconfig)
+	} else {
+		backConn, err = d.Dial("tcp", tcpAddr.String())
+
+		// if it is not tls and an instancename was provided, then use my PROXY protocol
+		if instancename != "" {
+			// send my PROXY preamble
+			var buffer bytes.Buffer
+
+			buffer.WriteString(tunnel.ProxyString)
+			// Write the length of the instancename to the buffer
+			buffer.WriteByte(byte(len(instancename)))
+			buffer.WriteString(instancename)
+			buffer.WriteByte('\n')
+
+			_, err = backConn.Write(buffer.Bytes())
+			if err != nil {
+				log.Errorf("session: [%s], failed to write PROXY header [%s]", tcpAddr.String(), err.Error())
+				return err
+			}
+		}
+	}
 	if err != nil {
 		log.Errorf("session: [%s], failed to connect to [%s]", tcpAddr.String(), err.Error())
 		return err

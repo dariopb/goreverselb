@@ -16,9 +16,10 @@ import (
 )
 
 type MuxTunnelClient struct {
-	apiEndpoint string
-	tunnelData  TunnelData
-	tlsconfig   *tls.Config
+	apiEndpoint     string
+	apiEndpointHost string
+	tunnelData      TunnelData
+	tlsconfig       *tls.Config
 
 	dialerTimeout   time.Duration
 	connectionCount int
@@ -42,11 +43,17 @@ func NewMuxTunnelClient(apiEndpoint string, td TunnelData) (*MuxTunnelClient, er
 	//tlsconfig.ServerName = net.SplitHostPort()
 	tlsconfig.InsecureSkipVerify = true
 
+	host, _, err := net.SplitHostPort(apiEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
 	tc := MuxTunnelClient{
-		apiEndpoint:   apiEndpoint,
-		tunnelData:    td,
-		dialerTimeout: 10 * time.Second,
-		tlsconfig:     tlsconfig,
+		apiEndpoint:     apiEndpoint,
+		apiEndpointHost: host,
+		tunnelData:      td,
+		dialerTimeout:   10 * time.Second,
+		tlsconfig:       tlsconfig,
 
 		connectionCount: td.BackendAcceptBacklog,
 		closeCh:         make(chan bool),
@@ -212,7 +219,7 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 	tc.mtx.Lock()
 	tc.tunnelData.FrontendData.Port = tdr.FrontendPort
 	tc.mtx.Unlock()
-	log.Infof("Tunnel ready on frontend: [%s] => [%s:%d]", tdr.ServiceName, tc.apiEndpoint, tdr.FrontendPort)
+	log.Infof("Tunnel ready on frontend: [%s] => [%s:%d]", tdr.ServiceName, tc.apiEndpointHost, tdr.FrontendPort)
 
 	// check for closed session (closed/keepalive failed/etc) or shutdown
 loop:

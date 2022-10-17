@@ -49,7 +49,8 @@ func client(ctx *cli.Context) error {
 		Token:                token,
 		BackendAcceptBacklog: 1,
 		FrontendData: tunnel.FrontendData{
-			Port: frontendport,
+			Port:    frontendport,
+			TLSWrap: wraptls,
 		},
 		TargetPort:      port,
 		TargetAddresses: []string{h},
