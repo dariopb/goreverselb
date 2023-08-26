@@ -17,3 +17,13 @@ docker tag dariob/reverselb-alpine dariob/reverselb-alpine:latest
 docker push dariob/reverselb-alpine:latest
 docker push dariob/reverselb-alpine:0.1
 
+# alpine-tunnelgroup
+docker build -f docker/Dockerfile-alpine-tunnelgroup.txt -t dariob/reverselb-tunnelgroup .
+docker tag dariob/reverselb-tunnelgroup dariob/reverselb-tunnelgroup:0.1
+docker tag dariob/reverselb-tunnelgroup dariob/reverselb-tunnelgroup:latest
+docker push dariob/reverselb-tunnelgroup:latest
+docker push dariob/reverselb-tunnelgroup:0.1
+
+# Run
+docker run --rm -e LOGLEVEL=debug -e TOKEN=$TOKEN -e LB_API_ENDPOINT=api.reverselb.com:9000 -e LB_SERVICE_GROUP_JSON='{"ssh1":{"name":"ssh1","ports":[{"port":8000,"protocol":"tcp","targetPort":22}],"backendIPs":["172.17.0.1"],"deleted":false}}' dariob/reverselb-tunnelgroup
+
