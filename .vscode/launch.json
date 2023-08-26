@@ -25,7 +25,7 @@
             "type": "go",
             "request": "launch",
             "mode": "auto",
-            "program": "${workspaceFolder}/cmd/goreverselb/server.go",
+            "program": "${workspaceFolder}/cmd/goreverselb",
             "env": { 
                 "LOGLEVEL" : "debug",
                 "TOKEN" : "1234",
@@ -36,6 +36,20 @@
                 "INSECURE_TLS" : "true"
             },
             "args": [ "tunnel" ]
+        },
+        {
+            "name": "Debug servicegroup",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/goreverselb",
+            "env": { 
+                "LOGLEVEL" : "debug",
+                "TOKEN" : "xxxx",
+                "LB_API_ENDPOINT" : "xxxx",
+                "LB_SERVICE_GROUP_JSON" : "{\"srv-1234\":{\"name\":\"srv-1234\",\"ports\":[{\"port\":8000,\"protocol\":\"tcp\"}],\"backendIPs\":[\"127.0.0.1\"],\"deleted\":false}}",
+            },
+            "args": [ "tunnelgroup" ]
         },
         {
             "name": "Debug proxy",

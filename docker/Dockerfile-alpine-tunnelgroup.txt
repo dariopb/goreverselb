@@ -1,0 +1,9 @@
+FROM alpine
+
+WORKDIR /
+
+COPY   goreverselb /goreverselb
+
+EXPOSE 9999
+
+CMD ["/goreverselb", "tunnelgroup"]

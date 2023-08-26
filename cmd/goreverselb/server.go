@@ -34,6 +34,7 @@ var natsport int
 
 // client
 var lbapiendpoint string
+var servicemapjson string
 var serviceendpoint string
 var insecuretls bool
 var wraptls bool
@@ -206,6 +207,33 @@ func main() {
 						EnvVars:     []string{"INSECURE_TLS"},
 						Destination: &insecuretls,
 						Required:    false,
+					},
+				},
+			},
+			{
+				Name:   "tunnelgroup",
+				Usage:  "creates multiple ingress tunnels",
+				Action: servicegroup,
+
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:        "apiendpoint",
+						Aliases:     []string{"e"},
+						Value:       "",
+						Usage:       "API endpoint in the form: hostname:port",
+						EnvVars:     []string{"LB_API_ENDPOINT"},
+						Destination: &lbapiendpoint,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "servicegroup",
+						Aliases:     []string{"g"},
+						Value:       "",
+						DefaultText: "",
+						Usage:       "service group json: like: '{\"ssh1\":{\"name\":\"ssh1\",\"ports\":[{\"port\":8000,\"protocol\":\"tcp\",\"targetPort\":22}],\"backendIPs\":[\"127.0.0.1\"],\"deleted\":false}}'",
+						EnvVars:     []string{"LB_SERVICE_GROUP_JSON"},
+						Destination: &servicemapjson,
+						Required:    true,
 					},
 				},
 			},
