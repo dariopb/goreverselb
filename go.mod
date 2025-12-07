@@ -1,6 +1,6 @@
 module github.com/dariopb/goreverselb
 
-go 1.18
+go 1.23
 
 //replace github.com/dariopb/goreverselb => ../goreverselb
 

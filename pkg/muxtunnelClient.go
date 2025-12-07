@@ -294,23 +294,39 @@ func (tc *MuxTunnelClient) doProxy(conn net.Conn) error {
 		return err
 	}
 
+	done := make(chan error, 2)
+
 	go func() {
 		l, err := tc.copybytes(backConn, conn)
 		log.Debugf("proxy connection [%s] finished content -> back (bytes %d, error: [%v]", tc.tunnelData.ServiceName, l, err)
+		done <- err
 	}()
 
-	{
+	go func() {
 		l, err := tc.copybytes(conn, backConn)
 		log.Debugf("proxy connection [%s] finished back -> content (bytes %d, error: [%v]", tc.tunnelData.ServiceName, l, err)
-	}
+		done <- err
+	}()
+
+	// Wait for both directions to finish
+	err = <-done
+	err = <-done
 
 	return nil
 }
 
-func (tc *MuxTunnelClient) copybytes(dst net.Conn, src net.Conn) (written int64, err error) {
+func (tc *MuxTunnelClient) copybytes(dst, src net.Conn) (written int64, err error) {
 	written, err = io.Copy(dst, src)
-	dst.Close()
-	src.Close()
+
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	} else {
+		_ = dst.Close()
+	}
+
+	if cr, ok := src.(interface{ CloseRead() error }); ok {
+		_ = cr.CloseRead()
+	}
 
 	return written, err
 }
