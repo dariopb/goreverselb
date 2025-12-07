@@ -478,15 +478,23 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName str
 		}
 	}
 
+	done := make(chan error, 2)
+
 	go func() {
 		l, err := ts.copybytes(serviceName, id, backConn, conn)
 		log.Debugf("proxy connection [%s] finished front -> back (bytes %d, error: [%v]", id, l, err)
+		done <- err
 	}()
 
-	{
+	go func() {
 		l, err := ts.copybytes(serviceName, id, conn, backConn)
 		log.Debugf("proxy connection [%s] finished back -> front (bytes %d, error: [%v]", id, l, err)
-	}
+		done <- err
+	}()
+
+	// Wait for both directions to finish
+	err = <-done
+	err = <-done
 }
 
 // Read the first packet and try to identify if there is any sni type of redirection that could be used.
@@ -642,8 +650,16 @@ func (ts *MuxTunnelService) tryHTTPProxyDecode(b []byte, conn net.Conn) string {
 
 func (ts *MuxTunnelService) copybytes(serviceName string, id string, dst net.Conn, src net.Conn) (written int64, err error) {
 	written, err = io.Copy(dst, src)
-	dst.Close()
-	src.Close()
+
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	} else {
+		_ = dst.Close()
+	}
+
+	if cr, ok := src.(interface{ CloseRead() error }); ok {
+		_ = cr.CloseRead()
+	}
 
 	return written, err
 }
