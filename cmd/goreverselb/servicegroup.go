@@ -15,7 +15,7 @@ func servicegroup(ctx *cli.Context) error {
 	printVersion()
 
 	loglevel := log.DebugLevel
-	if l, err := log.ParseLevel(loglevelstr); err == nil {
+	if l, err := log.ParseLevel(cfg.LogLevel); err == nil {
 		loglevel = l
 	}
 
@@ -28,14 +28,14 @@ func servicegroup(ctx *cli.Context) error {
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
 
-	tsg, err := tunnel.NewMuxTunnelClientServiceGroup(lbapiendpoint, token)
+	tsg, err := tunnel.NewMuxTunnelClientServiceGroup(cfg.APIEndpoint, cfg.Token)
 	if err != nil {
-		log.Fatalf("failed to start new tunnel service group: ", err)
+		log.Fatalf("failed to start new tunnel service group: %v", err)
 	}
 
-	err = tsg.ReconcileServiceGroupFromJSON(servicemapjson)
+	err = tsg.ReconcileServiceGroupFromJSON(cfg.ServiceGroupJSON)
 	if err != nil {
-		log.Fatalf("failed to reconcile service group: ", err)
+		log.Fatalf("failed to reconcile service group: %v", err)
 	}
 
 	c := make(chan os.Signal, 2)

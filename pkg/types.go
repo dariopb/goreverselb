@@ -55,6 +55,7 @@ type FrontendData struct {
 	Port    int `yaml:"port" json:"port"`
 	auto    bool
 	TLSWrap bool `yaml:"tlsWrap" json:"tlsWrap"`
+	SSHWrap bool `yaml:"sshWrap" json:"sshWrap"`
 }
 
 type TunnelData struct {

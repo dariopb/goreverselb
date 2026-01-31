@@ -34,7 +34,9 @@ type PortData struct {
 	Port     int    `json:"port"`
 	Protocol string `json:"protocol"`
 
-	TargetPort int `json:"targetPort"`
+	TargetPort int  `json:"targetPort"`
+	SSHWrap    bool `json:"sshWrap"`
+	TLSWrap    bool `json:"tlsWrap"`
 }
 
 // NewMuxTunnelClientServiceGroup creates a group of multiple services/clients.
@@ -80,7 +82,9 @@ func (c *MuxTunnelClientServiceGroup) reconcileTunnels(srv *ServiceInfo) {
 					ServiceName:          srv.Name,
 					BackendAcceptBacklog: 1,
 					FrontendData: FrontendData{
-						Port: p.Port,
+						Port:    p.Port,
+						SSHWrap: p.SSHWrap,
+						TLSWrap: p.TLSWrap,
 					},
 					Token:           srv.token,
 					TargetPort:      p.TargetPort,
