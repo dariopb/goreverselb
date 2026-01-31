@@ -17,7 +17,7 @@ func client(ctx *cli.Context) error {
 	printVersion()
 
 	loglevel := log.DebugLevel
-	if l, err := log.ParseLevel(loglevelstr); err == nil {
+	if l, err := log.ParseLevel(cfg.LogLevel); err == nil {
 		loglevel = l
 	}
 
@@ -30,33 +30,35 @@ func client(ctx *cli.Context) error {
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
 
-	h, p, err := net.SplitHostPort(serviceendpoint)
+	h, p, err := net.SplitHostPort(cfg.ServiceEndpoint)
 	if err != nil {
-		log.Fatalf("wrong format for endpoint: ", err)
+		log.Fatalf("wrong format for endpoint: %v", err)
 	}
 
 	port, _ := strconv.Atoi(p)
 	if err != nil {
-		log.Fatalf("wrong format for endpoint: ", err)
+		log.Fatalf("wrong format for endpoint: %v", err)
 	}
 
-	if len(instancename) > 0 {
-		servicename = servicename + ":" + instancename
+	serviceName := cfg.ServiceName
+	if len(cfg.InstanceName) > 0 {
+		serviceName = serviceName + ":" + cfg.InstanceName
 	}
 
 	td := tunnel.TunnelData{
-		ServiceName:          servicename,
-		Token:                token,
+		ServiceName:          serviceName,
+		Token:                cfg.Token,
 		BackendAcceptBacklog: 1,
 		FrontendData: tunnel.FrontendData{
-			Port:    frontendport,
-			TLSWrap: wraptls,
+			Port:    cfg.FrontendPort,
+			TLSWrap: cfg.WrapTLS,
+			SSHWrap: cfg.WrapSSH,
 		},
 		TargetPort:      port,
 		TargetAddresses: []string{h},
 	}
 
-	tunnel.NewMuxTunnelClient(lbapiendpoint, td)
+	tunnel.NewMuxTunnelClient(cfg.APIEndpoint, td)
 
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)

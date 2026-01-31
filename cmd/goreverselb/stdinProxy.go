@@ -16,7 +16,7 @@ import (
 
 func stdinProxy(ctx *cli.Context) error {
 	loglevel := log.DebugLevel
-	if l, err := log.ParseLevel(loglevelstr); err == nil {
+	if l, err := log.ParseLevel(cfg.LogLevel); err == nil {
 		loglevel = l
 	}
 
@@ -26,11 +26,12 @@ func stdinProxy(ctx *cli.Context) error {
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
 
-	if instancename == "" {
-		instancename = serviceendpoint
+	instanceName := cfg.InstanceName
+	if instanceName == "" {
+		instanceName = cfg.ServiceEndpoint
 	}
 
-	doProxy()
+	doProxy(instanceName)
 
 	//c := make(chan os.Signal, 2)
 	//signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -40,8 +41,8 @@ func stdinProxy(ctx *cli.Context) error {
 	return nil
 }
 
-func doProxy() error {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", serviceendpoint)
+func doProxy(instanceName string) error {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", cfg.ServiceEndpoint)
 	if err != nil {
 		log.Errorf("session: [%s], failed to resolve endpoint [%s]", tcpAddr.String(), err.Error())
 		return err
@@ -51,10 +52,10 @@ func doProxy() error {
 
 	d := &net.Dialer{Timeout: 5 * time.Second}
 
-	if wraptls {
+	if cfg.WrapTLS {
 		tlsconfig := &tls.Config{
-			InsecureSkipVerify: insecuretls,
-			ServerName:         instancename,
+			InsecureSkipVerify: cfg.InsecureTLS,
+			ServerName:         instanceName,
 		}
 
 		backConn, err = tls.DialWithDialer(d, "tcp", tcpAddr.String(), tlsconfig)
@@ -62,14 +63,14 @@ func doProxy() error {
 		backConn, err = d.Dial("tcp", tcpAddr.String())
 
 		// if it is not tls and an instancename was provided, then use my PROXY protocol
-		if instancename != "" {
+		if instanceName != "" {
 			// send my PROXY preamble
 			var buffer bytes.Buffer
 
 			buffer.WriteString(tunnel.ProxyString)
 			// Write the length of the instancename to the buffer
-			buffer.WriteByte(byte(len(instancename)))
-			buffer.WriteString(instancename)
+			buffer.WriteByte(byte(len(instanceName)))
+			buffer.WriteString(instanceName)
 			buffer.WriteByte('\n')
 
 			_, err = backConn.Write(buffer.Bytes())

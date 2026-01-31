@@ -3,21 +3,132 @@ package tunnel
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/cryptobyte"
 
+	"github.com/gliderlabs/ssh"
 	"github.com/hashicorp/yamux"
 	log "github.com/sirupsen/logrus"
+	gossh "golang.org/x/crypto/ssh"
 )
+
+// sshAddr implements net.Addr for SSH tunnel connections
+type SshAddr struct {
+	addr net.Addr
+}
+
+func (a SshAddr) Network() string {
+	return "ssh_tunnel"
+}
+func (a SshAddr) String() string {
+	if a.addr != nil {
+		return "ssh_tunnel::" + a.addr.String()
+	}
+
+	return "ssh_tunnel::0:0"
+}
+
+// channelConn wraps a gossh.Channel to implement net.Conn interface
+type channelConn struct {
+	gossh.Channel
+	laddr net.Addr
+	raddr net.Addr
+}
+
+// LocalAddr returns the local network address
+func (c *channelConn) LocalAddr() net.Addr {
+	return &SshAddr{addr: c.laddr}
+}
+
+// RemoteAddr returns the remote network address
+func (c *channelConn) RemoteAddr() net.Addr {
+	return &SshAddr{addr: c.raddr}
+}
+
+// SetDeadline sets the read and write deadlines
+func (c *channelConn) SetDeadline(t time.Time) error {
+	// SSH channels don't support deadlines
+	return nil
+}
+
+// SetReadDeadline sets the deadline for future Read calls
+func (c *channelConn) SetReadDeadline(t time.Time) error {
+	// SSH channels don't support deadlines
+	return nil
+}
+
+// SetWriteDeadline sets the deadline for future Write calls
+func (c *channelConn) SetWriteDeadline(t time.Time) error {
+	// SSH channels don't support deadlines
+	return nil
+}
+
+// newChannelConn creates a new net.Conn from a gossh.Channel
+func newChannelConn(ch gossh.Channel, laddr, raddr net.Addr) net.Conn {
+	return &channelConn{
+		Channel: ch,
+		laddr:   laddr,
+		raddr:   raddr,
+	}
+}
+
+// loadOrCreateSSHKey loads an SSH host key from file, or creates and saves a new one if it doesn't exist
+func loadOrCreateSSHKey(filename string) (gossh.Signer, error) {
+	// Try to load existing key from file
+	keyData, err := os.ReadFile(filename)
+	if err == nil {
+		// Key file exists, parse it
+		signer, err := gossh.ParsePrivateKey(keyData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse existing SSH key from %s: %w", filename, err)
+		}
+		log.Infof("Loaded SSH host key from %s", filename)
+		return signer, nil
+	}
+
+	// Key doesn't exist, generate a new one
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read SSH key file %s: %w", filename, err)
+	}
+
+	log.Infof("Generating new Ed25519 SSH host key and saving to %s", filename)
+	_, privateKey, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Ed25519 key: %w", err)
+	}
+
+	// Encode the private key to OpenSSH format using golang.org/x/crypto/ssh
+	pemBlock, err := gossh.MarshalPrivateKey(privateKey, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal private key: %w", err)
+	}
+	privateKeyPEM := pem.EncodeToMemory(pemBlock)
+
+	// Save the key to file with restricted permissions (owner read/write only)
+	if err := os.WriteFile(filename, privateKeyPEM, 0600); err != nil {
+		return nil, fmt.Errorf("failed to save SSH key to %s: %w", filename, err)
+	}
+
+	signer, err := gossh.NewSignerFromKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create signer from key: %w", err)
+	}
+
+	return signer, nil
+}
 
 type muxfrontendRuntimeData struct {
 	serviceName    string
@@ -37,6 +148,11 @@ type MuxTunnelService struct {
 	cert             tls.Certificate
 	mtx              sync.Mutex
 	closeCh          chan bool
+	sshSigner        gossh.Signer
+
+	// SSH reverse port forwarding state
+	sshForwardsMtx sync.Mutex
+	sshForwards    map[*gossh.ServerConn]map[string]net.Listener
 }
 
 type TunnelFrontendServices struct {
@@ -56,7 +172,14 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 		frontendMap: make(map[string]map[string]*muxfrontendRuntimeData),
 		closeCh:     make(chan bool),
 		cert:        cert,
+		sshForwards: make(map[*gossh.ServerConn]map[string]net.Listener),
 	}
+
+	signer, err := loadOrCreateSSHKey("revlb_ssh_host_key")
+	if err != nil {
+		return nil, err
+	}
+	ts.sshSigner = signer
 
 	// create the frontendMap for the defined users
 	for _, u := range configData.Users {
@@ -346,6 +469,25 @@ func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, ins
 			}
 			instancename := ""
 
+			// DARIO BUGBUG fake it for now
+			//fed.SSHWrap = true
+			//var wrapConn net.Conn
+
+			if fed.SSHWrap {
+				// If the service requested to always be wrapped over SSH, do it.
+				l.Info("Upgrading frontend connection to SSH")
+
+				sshDoneCh := make(chan error, 1)
+
+				go func() {
+					ts.handleSSH(userID, serviceName, instanceName, conn, sshDoneCh)
+					conn.Close()
+				}()
+
+				// continue accepting new connections here, ssh handler will clean up
+				continue
+			}
+
 			// If the service requested to always be wrapped over TLS (most likely HTTP traffic), do it.
 			if fed.TLSWrap {
 				l.Info("Upgrading frontend connection to TLS")
@@ -378,6 +520,82 @@ func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, ins
 	}
 
 	return &frontendRuntime, err
+}
+
+func (ts *MuxTunnelService) handleSSH(userID, serviceName string, instanceName string, conn net.Conn, connCh chan error) {
+
+	server := ssh.Server{
+		BannerHandler: func(ctx ssh.Context) string {
+			return "" +
+				"##########################\n" +
+				"# reverselb ssh endpoint #\n" +
+				"##########################\n"
+		},
+
+		HostSigners: []ssh.Signer{ts.sshSigner},
+		PasswordHandler: ssh.PasswordHandler(func(ctx ssh.Context, password string) bool {
+			log.Println("SSH wrap password auth attempt for user:", ctx.User())
+			// For now, accept any password
+			return true
+		}),
+		Handler: func(s ssh.Session) {
+			_, _ = io.WriteString(s, "Only port forwarding available...\n")
+			_, _ = io.WriteString(s, "Use '-N' flag to not start a terminal session\n")
+		},
+		ChannelHandlers: map[string]ssh.ChannelHandler{
+			"direct-tcpip": func(srv *ssh.Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx ssh.Context) {
+				ts.directTCPIPHandler(srv, conn, newChan, ctx, connCh, userID, serviceName, instanceName)
+			},
+			"session": ssh.DefaultSessionHandler,
+		},
+	}
+
+	server.HandleConn(conn)
+}
+
+type localForwardChannelData struct {
+	DestAddr string
+	DestPort uint32
+
+	OriginAddr string
+	OriginPort uint32
+}
+
+func (ts *MuxTunnelService) directTCPIPHandler(srv *ssh.Server,
+	conn *gossh.ServerConn,
+	newChan gossh.NewChannel,
+	ctx ssh.Context,
+	sshDoneCh chan error,
+	userID, serviceName, instancename string) {
+	d := localForwardChannelData{}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &d); err != nil {
+		newChan.Reject(gossh.ConnectionFailed, "error parsing forward data: "+err.Error())
+		return
+	}
+
+	log.Infof("DirectTCPIPHandler request from: %s:%s to %s:%d", conn.Conn.LocalAddr(), conn.Conn.RemoteAddr(), d.DestAddr, d.DestPort)
+
+	ch, reqs, err := newChan.Accept()
+	if err != nil {
+		log.Errorf("could not accept ssh channel: %v", err)
+		sshDoneCh <- err
+		return
+	}
+	go gossh.DiscardRequests(reqs)
+
+	// Wrap the SSH channel as a net.Conn
+	destAddr := &net.TCPAddr{
+		IP:   net.ParseIP(d.DestAddr),
+		Port: int(d.DestPort),
+	}
+	originAddr := &net.TCPAddr{
+		IP:   net.ParseIP(d.OriginAddr),
+		Port: int(d.OriginPort),
+	}
+	wrappedConn := newChannelConn(ch, destAddr, originAddr)
+
+	// Start proxying data
+	go ts.doProxy(userID, serviceName, instancename, wrappedConn)
 }
 
 func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName string, conn net.Conn) {
@@ -415,6 +633,7 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName str
 	}
 	defer func() {
 		conn.Close()
+		//wrapConn.Close()
 		l.Debug("connection closed")
 	}()
 
