@@ -181,7 +181,7 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 
 	err = o.Encode(tc.tunnelData)
 	if err != nil {
-		log.Errorf("Failed sending tunnel info:[%s], stream:[%s], %s: %s", session.RemoteAddr().String(), tc.apiEndpoint, err.Error())
+		log.Errorf("Failed sending tunnel info:[%s], stream:[%s], error: %s", session.RemoteAddr().String(), tc.apiEndpoint, err.Error())
 		return err
 	}
 

@@ -7,21 +7,21 @@ import (
 type LrusLogger struct{}
 
 func (LrusLogger) Noticef(format string, v ...interface{}) {
-	log.Infof(format, v)
+	log.Infof(format, v...)
 }
 
 func (LrusLogger) Warnf(format string, v ...interface{}) {
-	log.Warnf(format, v)
+	log.Warnf(format, v...)
 }
 func (LrusLogger) Fatalf(format string, v ...interface{}) {
-	log.Fatalf(format, v)
+	log.Fatalf(format, v...)
 }
 func (LrusLogger) Errorf(format string, v ...interface{}) {
-	log.Errorf(format, v)
+	log.Errorf(format, v...)
 }
 func (LrusLogger) Debugf(format string, v ...interface{}) {
-	log.Debugf(format, v)
+	log.Debugf(format, v...)
 }
 func (LrusLogger) Tracef(format string, v ...interface{}) {
-	log.Tracef(format, v)
+	log.Tracef(format, v...)
 }

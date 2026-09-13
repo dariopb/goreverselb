@@ -1,0 +1,7 @@
+users:
+  default@none:
+    userId: default@none
+    token: "1234"
+    role: ""
+    services: {}
+    allowedSources: '*'

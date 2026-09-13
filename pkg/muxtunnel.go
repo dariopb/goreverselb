@@ -148,11 +148,14 @@ type MuxTunnelService struct {
 	cert             tls.Certificate
 	mtx              sync.Mutex
 	closeCh          chan bool
+	closeOnce        sync.Once
+	tunnelListener   net.Listener
 	sshSigner        gossh.Signer
 
-	// SSH reverse port forwarding state
-	sshForwardsMtx sync.Mutex
-	sshForwards    map[*gossh.ServerConn]map[string]net.Listener
+	sshBackendListener  net.Listener
+	sshBackendRawConns  map[net.Conn]struct{}
+	sshBackendConns     map[*gossh.ServerConn]struct{}
+	sshReverseFrontends map[int]*sshReverseFrontend
 }
 
 type TunnelFrontendServices struct {
@@ -166,13 +169,15 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 	rand.Seed(time.Now().UnixNano())
 
 	ts := MuxTunnelService{
-		port:        servicePort,
-		token:       token,
-		configData:  configData,
-		frontendMap: make(map[string]map[string]*muxfrontendRuntimeData),
-		closeCh:     make(chan bool),
-		cert:        cert,
-		sshForwards: make(map[*gossh.ServerConn]map[string]net.Listener),
+		port:                servicePort,
+		token:               token,
+		configData:          configData,
+		frontendMap:         make(map[string]map[string]*muxfrontendRuntimeData),
+		closeCh:             make(chan bool),
+		cert:                cert,
+		sshBackendRawConns:  make(map[net.Conn]struct{}),
+		sshBackendConns:     make(map[*gossh.ServerConn]struct{}),
+		sshReverseFrontends: make(map[int]*sshReverseFrontend),
 	}
 
 	signer, err := loadOrCreateSSHKey("revlb_ssh_host_key")
@@ -194,6 +199,7 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 		log.Fatal("tunnel service listener error:", err)
 	}
 
+	ts.tunnelListener = listener
 	log.Infof("tunnel service listening on: tcp => %s", listener.Addr().String())
 
 	go func() {
@@ -213,7 +219,24 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 
 // Close closes the tunnel service
 func (ts *MuxTunnelService) Close() {
-	close(ts.closeCh)
+	ts.closeOnce.Do(func() {
+		close(ts.closeCh)
+
+		ts.mtx.Lock()
+		if ts.tunnelListener != nil {
+			_ = ts.tunnelListener.Close()
+		}
+		if ts.sshBackendListener != nil {
+			_ = ts.sshBackendListener.Close()
+		}
+		for conn := range ts.sshBackendRawConns {
+			_ = conn.Close()
+		}
+		for _, frontend := range ts.sshReverseFrontends {
+			_ = frontend.listener.Close()
+		}
+		ts.mtx.Unlock()
+	})
 }
 
 func (ts *MuxTunnelService) GetServices(userID string) map[string]TunnelFrontendServices {
@@ -225,6 +248,14 @@ func (ts *MuxTunnelService) GetServices(userID string) map[string]TunnelFrontend
 			Name:    val.serviceName,
 			Port:    val.port,
 			Address: "",
+		}
+	}
+	if userID == DefaultUserID {
+		for _, frontend := range ts.sshReverseFrontends {
+			srvs[frontend.serviceName] = TunnelFrontendServices{
+				Name: frontend.serviceName,
+				Port: frontend.port,
+			}
 		}
 	}
 
@@ -310,6 +341,15 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		}
 	}
 
+	if td.FrontendData.Port != 0 {
+		if _, exists := ts.sshReverseFrontends[td.FrontendData.Port]; exists {
+			ts.mtx.Unlock()
+			err := fmt.Errorf("stream: [%s] frontend port is owned by an SSH reverse backend", serviceName)
+			l.Error(err.Error())
+			ts.sendResponse(&td, out, err)
+			return
+		}
+	}
 	port, err := ts.frontendPortPool.GetElement(td.FrontendData.Port)
 	if td.FrontendData.Port == 0 {
 		if err != nil {

@@ -63,7 +63,7 @@ func (p *PoolInts) ReturnElement(v int) error {
 		p.free[v] = true
 	}
 
-	log.Debugf("Pool ReturnElement: [%d] => (free:%d)", len(p.free))
+	log.Debugf("Pool ReturnElement: [%d] => (free:%d)", v, len(p.free))
 
 	return nil
 }
