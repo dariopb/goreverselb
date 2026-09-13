@@ -116,6 +116,22 @@ func main() {
 						Destination: &cfg.DynPortCount,
 						Required:    false,
 					},
+					&cli.IntFlag{
+						Name:        "sshbackendport",
+						Value:       0,
+						Usage:       "port for SSH reverse backend connections (disabled if not provided)",
+						EnvVars:     []string{"REVLB_SSH_BACKEND_PORT"},
+						Destination: &cfg.SSHBackendPort,
+						Required:    false,
+					},
+					&cli.StringFlag{
+						Name:        "sshbackenduser",
+						Value:       tunnel.DefaultSSHBackendUser,
+						Usage:       "required SSH username for reverse backend connections",
+						EnvVars:     []string{"REVLB_SSH_BACKEND_USER"},
+						Destination: &cfg.SSHBackendUser,
+						Required:    false,
+					},
 				},
 			},
 			{
@@ -287,6 +303,10 @@ func main() {
 func server(ctx *cli.Context) error {
 	printVersion()
 
+	if strings.TrimSpace(cfg.SSHBackendUser) == "" {
+		return fmt.Errorf("sshbackenduser must not be empty")
+	}
+
 	loglevel := log.InfoLevel
 	if l, err := log.ParseLevel(cfg.LogLevel); err == nil {
 		loglevel = l
@@ -323,6 +343,11 @@ func server(ctx *cli.Context) error {
 	ts, err := tunnel.NewMuxTunnelService(configData, *cert, cfg.Port, cfg.Token, cfg.DynPort, cfg.DynPortCount)
 	if err != nil {
 		log.Fatalf("failed to start new tunnel service: %v", err)
+	}
+
+	if err := ts.StartSSHBackend(cfg.SSHBackendPort, cfg.SSHBackendUser); err != nil {
+		ts.Close()
+		return fmt.Errorf("failed to start SSH backend listener: %w", err)
 	}
 
 	if cfg.NATSPort != 0 {

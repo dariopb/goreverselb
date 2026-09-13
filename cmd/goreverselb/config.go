@@ -13,6 +13,8 @@ type Config struct {
 	NATSPort            int
 	DynPort             int
 	DynPortCount        int
+	SSHBackendPort      int
+	SSHBackendUser      string
 
 	// Client/Tunnel options
 	APIEndpoint     string

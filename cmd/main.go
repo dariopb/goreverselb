@@ -39,7 +39,7 @@ func main() {
 
 	cert, err := certHelper.CreateDynamicTlsCertWithKey("localhost")
 	if err != nil {
-		log.Fatalf("failed to create tls certificate: ", err)
+		log.Fatalf("failed to create tls certificate: %v", err)
 	}
 
 	//pubsub.NewNatsServer(*cert, port, "1234")

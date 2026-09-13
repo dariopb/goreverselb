@@ -78,8 +78,43 @@ OPTIONS:
    --natsport value                       port for the secure NATS endpoint (server will be disabled if not provided) (default: 0) [$REVLB_NATS_PORT]
    --dynport value                        dynamic frontend port base (default: 8000) [$REVLB_DYN_FRONTEND_PORT]
    --dynportcount value                   number of dynamic frontend ports (default: 100) [$REVLB_DYN_FRONTEND_PORT_COUNT]
+   --sshbackendport value                 port for SSH reverse backend connections (disabled if not provided) (default: 0) [$REVLB_SSH_BACKEND_PORT]
+   --sshbackenduser value                 required SSH username for reverse backend connections (default: "reverseuser") [$REVLB_SSH_BACKEND_USER]
    --help, -h                             show help (default: false)
 ```
+
+## SSH reverse backend
+
+The server can accept standard SSH remote forwarding as an alternative to running the goreverselb client binary. Enable the dedicated SSH backend listener:
+
+```bash
+./goreverselb -t "0000" server -p 9999 -s localhost \
+    --sshbackendport 2222
+```
+
+From the backend machine, publish its local SSH service on frontend port 8005:
+
+```bash
+ssh -NT \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -R 8005:127.0.0.1:22 \
+    reverseuser@SERVER -p 2222
+```
+
+Enter the server token (`0000` above) as the SSH password. The username defaults to `reverseuser` and can be changed with `--sshbackenduser` or `REVLB_SSH_BACKEND_USER`. Any other username is disconnected immediately.
+
+Remote port `0` requests a dynamic frontend port from the configured pool:
+
+```bash
+ssh -NT -v -o ExitOnForwardFailure=yes \
+    -R 0:127.0.0.1:22 reverseuser@SERVER -p 2222
+```
+
+The listener is public on `0.0.0.0` even if the `-R` bind address says `localhost`. Explicit and dynamic ports must belong to the configured dynamic frontend range. One SSH connection owns one frontend port; run another SSH connection for another port. Multiple SSH clients may register the same frontend port, and incoming connections are randomly balanced between them.
+
+This backend listener supports password authentication and remote TCP forwarding only. It rejects shells, commands, local forwarding, public-key authentication, and instance routing. It is separate from the consumer-facing `--wrapSSH` option.
 
 ## Client
 
