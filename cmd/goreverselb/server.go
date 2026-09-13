@@ -140,7 +140,7 @@ func main() {
 				Usage:  "creates an ingress tunnel",
 				Action: client,
 
-				Flags: []cli.Flag{
+				Flags: append(clientTLSFlags(), []cli.Flag{
 					&cli.StringFlag{
 						Name:        "apiendpoint",
 						Aliases:     []string{"e"},
@@ -204,23 +204,14 @@ func main() {
 						Destination: &cfg.InstanceName,
 						Required:    false,
 					},
-					&cli.BoolFlag{
-						Name:        "insecuretls",
-						Aliases:     []string{"i"},
-						Value:       false,
-						Usage:       "allow skip checking server CA/hostname",
-						EnvVars:     []string{"REVLB_INSECURE_TLS"},
-						Destination: &cfg.InsecureTLS,
-						Required:    false,
-					},
-				},
+				}...),
 			},
 			{
 				Name:   "tunnelgroup",
 				Usage:  "creates multiple ingress tunnels",
 				Action: servicegroup,
 
-				Flags: []cli.Flag{
+				Flags: append(clientTLSFlags(), []cli.Flag{
 					&cli.StringFlag{
 						Name:        "apiendpoint",
 						Aliases:     []string{"e"},
@@ -240,7 +231,7 @@ func main() {
 						Destination: &cfg.ServiceGroupJSON,
 						Required:    true,
 					},
-				},
+				}...),
 			},
 			{
 				Name: "stdinproxy",

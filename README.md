@@ -15,6 +15,156 @@ There is a client and a server components. The server is intended to be run on a
 The client (either via the cmd line application, library or container orchestrator extension) makes an TLS protected outbound connection to the reverselb server and configures the tunnel endpoints properties. The server now starts listening externally on the port the client instructed it to and when connections are received on this port, it relays the data back and forth between it and the backend connection. As many connections as desired can be established.
 
 
+## Caddy application and modules
+
+The repository also includes an explicitly assembled Caddy application in
+`cmd/caddy-reverselb`. It imports standard Caddy, caddy-l4, and the goreverselb
+modules; building it does **not** use `xcaddy`. The standalone
+`go build ./cmd/goreverselb` command is unchanged.
+
+```sh
+go build -v ./cmd/caddy-reverselb
+./caddy-reverselb list-modules
+./caddy-reverselb adapt --config caddy/examples/dynamic.Caddyfile --adapter caddyfile --pretty
+REVLB_TOKEN='replace-with-a-secret' ./caddy-reverselb run \
+  --config caddy/examples/dynamic.Caddyfile --adapter caddyfile
+```
+
+The Caddy application and plugin are separate Go modules requiring Go 1.26.
+The checked-in `go.work` makes all three modules buildable from the repository
+root. The workspace uses Go 1.26 and a combined dependency selection, without
+adding Caddy requirements to the standalone `go.mod`. To build the standalone
+module with only its own dependencies/toolchain settings, use
+`GOWORK=off go build ./cmd/goreverselb`. Module-local builds also remain supported:
+`cd cmd/caddy-reverselb && GOWORK=off go build .`.
+The plugin is importable
+as `github.com/dariopb/goreverselb/caddy`; local third-party builds can also use:
+
+```sh
+xcaddy build \
+  --with github.com/dariopb/goreverselb/caddy=./caddy \
+  --with github.com/dariopb/goreverselb=.
+```
+
+The default examples publish **HTTP-only frontends**, with automatic HTTPS
+disabled and no public certificate requests. They run locally without DNS or
+ACME setup. The tunnel control connection still uses TLS, as required by
+existing goreverselb clients; its certificate is issued locally by Caddy's
+internal CA. The sample disables installation of that CA into system/browser
+trust stores. Use the local CA explicitly with `--tlscafile` when enabling
+client certificate verification.
+
+For a remote deployment, change `advertise_host` and the control TLS identity
+and configure the appropriate certificate/trust policy. Supplied certificates
+can use `apps.tls.certificates.load_files` in native JSON. Public certificate
+automation is opt-in and requires working ACME challenge routing or an
+appropriate issuer.
+
+**Dynamic publication:** only policy, templates, and a port pool are configured.
+Clients register new services normally:
+
+```sh
+# With REVLB_TOKEN set, allocate an HTTP frontend for a local web server:
+./goreverselb tunnel -e localhost:9999 -s web -b 127.0.0.1:8080
+
+# Or publish HTTP on exactly port 8005:
+./goreverselb tunnel -e localhost:9999 -s web-demo -p 8005 -b 127.0.0.1:8080
+```
+
+Open `http://localhost:8005/` for the explicit-port example. Raw TCP remains
+supported by selecting an operator-configured `kind: tcp` template; the default
+sample intentionally contains only the HTTP template.
+
+The controller writes real HTTP/L4 servers, routes, and logical bindings to
+Caddy's active JSON using conditional, atomic admin transactions. An endpoint
+is acknowledged only after publication. Additional sessions reuse its port;
+the last session leaving removes its generated configuration. Existing tunnel
+sessions survive compatible publication reloads. Ports outside the pool,
+conflicting requests, unsupported wrapping, and unauthorized services fail
+registration instead of silently changing behavior.
+
+Inspect the ordinary Caddy control plane:
+
+```sh
+curl http://127.0.0.1:2020/config/apps/goreverselb/generated
+curl http://127.0.0.1:2020/config/apps/http/servers
+curl http://127.0.0.1:2020/config/apps/layer4/servers
+curl http://127.0.0.1:2020/goreverselb/status
+```
+
+The samples bind the admin listener to `0.0.0.0:2020`, so another machine can use
+`http://<server-ip>:2020/config/`. The admin API has no homepage or web UI;
+requesting `/` returns 404. **This API has full configuration access and
+no built-in password authentication. Restrict port 2020 to trusted machines with
+a firewall; do not expose it to the public Internet.**
+
+The internal controller connects to `http://127.0.0.1:2020`; do not change
+`publication.admin_endpoint` to `0.0.0.0`. That setting is a destination URL, not
+the listener bind address. The controller supports a loopback HTTP endpoint or
+`unix:///absolute/path/to/admin.sock` and never gives tunnel clients admin
+credentials. Port 2020 avoids conflicting with another Caddy instance on the
+standard admin port 2019. A loopback-specific listener can take precedence over
+a wildcard listener on the same port, sending controller requests to the wrong
+instance. If choosing another port, change both `admin` and
+`publication.admin_endpoint` together.
+
+Generated objects have stable `@id` values and must not be edited
+independently of their ownership manifest. Change policy/templates instead.
+The original Caddyfile is not rewritten. Active JSON can be autosaved/resumed
+by Caddy, and publication intents are journaled in configured Caddy storage.
+An unresolved publication reserves its port conservatively; only the same
+authenticated service can recover it.
+
+TCP templates support direct, SNI, and opt-in legacy instance dispatch. HTTP
+templates use Caddy's regular `reverse_proxy` and support direct or Host
+dispatch. A direct template allows one distinct instance per service, with
+multiple sessions for that instance. Native JSON additionally supports
+`allowed_sources`, operator-supplied `middleware`, and HTTP `upstream` settings.
+Static `bindings_only` mode remains available for operator-defined shared
+listeners. Consumer-facing `SSHWrap` and SSH remote-forward registration in
+Caddy are not supported; use the standalone server for those features.
+
+The full design and release acceptance criteria remain in
+[spec-caddy-l4integration.md](spec-caddy-l4integration.md). This implementation
+does not yet implement every operational requirement in that design: live
+template changes for existing endpoints require disconnecting those endpoints
+first; runtime-wide configurable drain deadlines, the full configurable limit
+surface, and publication-specific Prometheus metrics remain outstanding.
+Configuration transactions reload Caddy. Unknown publication outcomes retain
+reservations conservatively rather than releasing potentially occupied ports.
+Exhaustive version-matrix, capacity, crash-recovery, and shared-port validation
+remain required before a production release. The current plugin's local-module
+replacements are for checkout builds; published plugin distribution also
+requires releasing the updated root module and pinning that release.
+
+## Connection diagnostics
+
+Use `-l debug` for the standalone server, tunnel client, or tunnel group:
+
+```sh
+./goreverselb -l debug -t "$REVLB_TOKEN" tunnel \
+  -e localhost:9999 -s ddd -b localhost:9998
+```
+
+Debug logging includes connection setup, TLS verification mode, registration,
+and retries. Once traffic reaches the assigned frontend, each stream includes
+the original `source_address` (IP/port), frontend address/port, tunnel
+`tunnel_local`/`tunnel_remote` addresses and `stream_id`, and the selected
+backend's configured and actual local/remote addresses. Completion logs report
+each copy direction, byte count, duration, and errors. Match the tunnel address
+pair and stream ID to follow the connection across server and client logs.
+Tokens and payloads are not logged.
+
+The client flag does not change Caddy's logging level. For Caddy-side HTTP/L4
+tunnel diagnostics, add `debug` to the Caddyfile's existing global options
+block, or configure native JSON
+`"logging": {"logs": {"default": {"level": "DEBUG"}}}`. L4 logs include the
+frontend-to-tunnel hop and directional transfer counts; client logs show the
+tunnel-to-backend hop. With HTTP keep-alive or HTTP/2, stream diagnostics describe
+the pooled transport connection; use Caddy access logs for individual requests.
+Until a consumer connects to the frontend, only setup/registration diagnostics
+are expected.
+
 ## SNI/Host proxy loadbalancing
 
 The reverselb server will try to do protocol identification in order to get a possible SNI/Hostname style redirection on the same tunnel port (to be able to share the same service port with multiple service instances). The load balancing is done on service instance names if multiple registrations for the same name/port are made.
@@ -133,9 +283,31 @@ OPTIONS:
    --serviceendpoint value, -b value  backend service address (the local target for the lb: hostname:port) [$REVLB_SERVICE_ENDPOINT]
    --servicename value, -s value      service name string [$REVLB_SERVICE_NAME]
    --instancename value               instance name string (for SNI/Host functionality) (default: empty) [$REVLB_INSTANCE_NAME]
-   --insecuretls, -i                  allow skip checking server CA/hostname (default: false) [$REVLB_INSECURE_TLS]
+   --insecuretls, -i                  skip control server certificate verification (legacy default: true) [$REVLB_INSECURE_TLS]
+   --tlscafile value                 PEM CA bundle for control server verification [$REVLB_TLS_CA_FILE]
+   --tlsservername value             expected control server certificate name [$REVLB_TLS_SERVER_NAME]
    --help, -h                         show help (default: false)
 ```
+
+For Caddy deployments, enable verified control TLS explicitly:
+
+```sh
+./goreverselb tunnel -e tunnels.example.com:9999 \
+  --insecuretls=false -s web-demo -b 127.0.0.1:8080
+
+# Private CA, or an IP endpoint whose certificate has a DNS name:
+./goreverselb tunnel -e 192.0.2.10:9999 \
+  --tlscafile /path/to/ca.pem --tlsservername tunnels.example.com \
+  -s web-demo -b 127.0.0.1:8080
+```
+
+Both `tunnel` and `tunnelgroup` retain the historical insecure default for
+compatibility with standalone self-signed servers. `--insecuretls=false`
+verifies using system trust; specifying a CA file or server name enables
+verification and rejects an explicitly conflicting `--insecuretls=true`.
+The new library `NewMuxTunnelClientWithOptions` and
+`NewMuxTunnelClientServiceGroupWithOptions` constructors verify by default.
+Existing constructors retain legacy trust behavior.
 
 ## Tunnel Group
 ```
@@ -148,6 +320,9 @@ USAGE:
 OPTIONS:
    --apiendpoint value, -e value   API endpoint in the form: hostname:port [$REVLB_API_ENDPOINT]
    --servicegroup value, -g value  service group json: like: '{"ssh1":{"name":"ssh1","ports":[{"port":8000,"protocol":"tcp","targetPort":22}],"backendIPs":["127.0.0.1"],"deleted":false}}' [$REVLB_SERVICE_GROUP_JSON]
+   --insecuretls, -i                skip control server certificate verification (legacy default: true) [$REVLB_INSECURE_TLS]
+   --tlscafile value                PEM CA bundle for control server verification [$REVLB_TLS_CA_FILE]
+   --tlsservername value            expected control server certificate name [$REVLB_TLS_SERVER_NAME]
    --help, -h                      show help (default: false)
 ```
 

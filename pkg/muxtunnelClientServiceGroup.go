@@ -3,6 +3,7 @@ package tunnel
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
 
@@ -12,6 +13,8 @@ import (
 type MuxTunnelClientServiceGroup struct {
 	apiEndpoint string
 	token       string
+	options     ClientOptions
+	closed      bool
 
 	ServiceMap map[string]*ServiceInfo
 	tunnels    map[string]map[string]*MuxTunnelClient
@@ -41,12 +44,24 @@ type PortData struct {
 
 // NewMuxTunnelClientServiceGroup creates a group of multiple services/clients.
 func NewMuxTunnelClientServiceGroup(apiEndpoint string, token string) (*MuxTunnelClientServiceGroup, error) {
-	var err error
+	return NewMuxTunnelClientServiceGroupWithOptions(apiEndpoint, token, LegacyClientOptions())
+}
 
+// NewMuxTunnelClientServiceGroupWithOptions applies the same control TLS policy
+// to every managed client. Zero options enable certificate verification.
+func NewMuxTunnelClientServiceGroupWithOptions(apiEndpoint string, token string, options ClientOptions) (*MuxTunnelClientServiceGroup, error) {
+	if _, _, err := net.SplitHostPort(apiEndpoint); err != nil {
+		return nil, err
+	}
+	options, err := normalizeClientOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	log.Infof("NewMuxTunnelClientServiceGroup: on %s", apiEndpoint)
 	c := &MuxTunnelClientServiceGroup{
 		apiEndpoint: apiEndpoint,
 		token:       token,
+		options:     options,
 
 		ServiceMap: make(map[string]*ServiceInfo),
 		tunnels:    make(map[string]map[string]*MuxTunnelClient),
@@ -55,7 +70,7 @@ func NewMuxTunnelClientServiceGroup(apiEndpoint string, token string) (*MuxTunne
 	return c, err
 }
 
-func (c *MuxTunnelClientServiceGroup) reconcileTunnels(srv *ServiceInfo) {
+func (c *MuxTunnelClientServiceGroup) reconcileTunnels(srv *ServiceInfo) error {
 	var svcTunnelMap map[string]*MuxTunnelClient
 	ok := false
 
@@ -88,12 +103,12 @@ func (c *MuxTunnelClientServiceGroup) reconcileTunnels(srv *ServiceInfo) {
 					},
 					Token:           srv.token,
 					TargetPort:      p.TargetPort,
-					TargetAddresses: []string{},
+					TargetAddresses: srv.BackendIPs,
 				}
 
-				t, err = NewMuxTunnelClient(srv.tunnelEndpointAPI, td)
+				t, err = NewMuxTunnelClientWithOptions(srv.tunnelEndpointAPI, td, c.options)
 				if err != nil {
-					continue
+					return fmt.Errorf("create tunnel for service %q: %w", srv.Name, err)
 				}
 
 				svcTunnelMap[k] = t
@@ -120,12 +135,21 @@ func (c *MuxTunnelClientServiceGroup) reconcileTunnels(srv *ServiceInfo) {
 		t.Close()
 		delete(svcTunnelMap, portKey)
 	}
+	return nil
 }
 
 // ReconcileServiceGroup reconciles the map of services with a new map of services
 func (c *MuxTunnelClientServiceGroup) ReconcileServiceGroup(newservices map[string]*ServiceInfo) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+	if c.closed {
+		return net.ErrClosed
+	}
+	for name, srv := range newservices {
+		if srv == nil || srv.Name == "" {
+			return fmt.Errorf("service %q requires a name", name)
+		}
+	}
 
 	srvGone := make(map[string]bool)
 	for name := range c.ServiceMap {
@@ -139,10 +163,7 @@ func (c *MuxTunnelClientServiceGroup) ReconcileServiceGroup(newservices map[stri
 		var ok bool
 		if srv, ok = c.ServiceMap[svcname]; !ok {
 			srv = &ServiceInfo{
-				Name:       svcname,
-				BackendIPs: newservice.BackendIPs,
-				Ports:      newservice.Ports,
-
+				Name:              svcname,
 				tunnelEndpointAPI: c.apiEndpoint,
 				token:             c.token,
 			}
@@ -151,19 +172,44 @@ func (c *MuxTunnelClientServiceGroup) ReconcileServiceGroup(newservices map[stri
 		} else {
 			delete(srvGone, svcname)
 		}
+		srv.BackendIPs = append([]string(nil), newservice.BackendIPs...)
+		srv.Ports = append([]PortData(nil), newservice.Ports...)
+		srv.Deleted = newservice.Deleted
 
-		c.reconcileTunnels(srv)
+		if err := c.reconcileTunnels(srv); err != nil {
+			return err
+		}
 	}
 
 	// Removed services, delete the tunnels
 	for name := range srvGone {
 		srv := c.ServiceMap[name]
 		srv.Deleted = true
-		c.reconcileTunnels(srv)
+		if err := c.reconcileTunnels(srv); err != nil {
+			return err
+		}
 		delete(c.ServiceMap, name)
+		delete(c.tunnels, name)
 	}
 
 	return nil
+}
+
+// Close stops all managed clients and prevents further reconciliation.
+func (c *MuxTunnelClientServiceGroup) Close() {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	for _, service := range c.tunnels {
+		for _, client := range service {
+			client.Close()
+		}
+	}
+	c.tunnels = make(map[string]map[string]*MuxTunnelClient)
+	c.ServiceMap = make(map[string]*ServiceInfo)
 }
 
 // ReconcileServiceGroupFromJSON reconciles the map of services with a new map of services

@@ -28,18 +28,24 @@ func servicegroup(ctx *cli.Context) error {
 	log.SetLevel(loglevel)
 	log.SetOutput(os.Stdout)
 
-	tsg, err := tunnel.NewMuxTunnelClientServiceGroup(cfg.APIEndpoint, cfg.Token)
+	options, err := clientOptions(ctx)
 	if err != nil {
-		log.Fatalf("failed to start new tunnel service group: %v", err)
+		return err
 	}
+	tsg, err := tunnel.NewMuxTunnelClientServiceGroupWithOptions(cfg.APIEndpoint, cfg.Token, options)
+	if err != nil {
+		return err
+	}
+	defer tsg.Close()
 
 	err = tsg.ReconcileServiceGroupFromJSON(cfg.ServiceGroupJSON)
 	if err != nil {
-		log.Fatalf("failed to reconcile service group: %v", err)
+		return err
 	}
 
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(c)
 
 	<-c
 

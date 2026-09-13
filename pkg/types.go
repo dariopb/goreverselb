@@ -2,13 +2,11 @@ package tunnel
 
 import (
 	"crypto/tls"
-	"encoding/binary"
-	"encoding/json"
-	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/dariopb/goreverselb/pkg/tunnelcore/protocol"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -51,32 +49,9 @@ type frontendRuntimeData struct {
 	backendConnMap     map[string]*backendRuntimeData
 }
 
-type FrontendData struct {
-	Port    int `yaml:"port" json:"port"`
-	auto    bool
-	TLSWrap bool `yaml:"tlsWrap" json:"tlsWrap"`
-	SSHWrap bool `yaml:"sshWrap" json:"sshWrap"`
-}
-
-type TunnelData struct {
-	ID             string       `yaml:"id" json:"id"`
-	ServiceName    string       `yaml:"serviceName" json:"serviceName"`
-	Token          string       `yaml:"token" json:"token"`
-	AllowedSources string       `yaml:"allowedSources" json:"allowedSources"`
-	FrontendData   FrontendData `yaml:"frontendData" json:"frontendData"`
-
-	BackendAcceptBacklog int
-	TargetPort           int
-	TargetAddresses      []string
-}
-
-type TunnelDataResponse struct {
-	ID              string `yaml:"id" json:"id"`
-	ServiceName     string `yaml:"serviceName" json:"serviceName"`
-	FrontendPort    int    `yaml:"frontendPort" json:"frontendPort"`
-	FrontendAddress string `yaml:"frontendAddress" json:"frontendAddress"`
-	Error           string `yaml:"error" json:"error"`
-}
+type FrontendData = protocol.FrontendData
+type TunnelData = protocol.TunnelData
+type TunnelDataResponse = protocol.TunnelDataResponse
 
 type TunnelService struct {
 	Port      int `yaml:"port" json:"port"`
@@ -87,11 +62,7 @@ type TunnelService struct {
 	mtx         sync.Mutex
 }
 
-type TunnelConnecData struct {
-	ID            string `yaml:"id" json:"id"`
-	ServiceName   string `yaml:"serviceName" json:"serviceName"`
-	SourceAddress string `yaml:"sourceAddress" json:"sourceAddress"`
-}
+type TunnelConnecData = protocol.TunnelConnecData
 
 func (frd *frontendRuntimeData) removeBackendConn(id string) {
 	log.Debugf("frontend removeBackendConn for: [%s]", id)
@@ -101,43 +72,10 @@ func (frd *frontendRuntimeData) removeBackendConn(id string) {
 }
 
 func readFrame(conn net.Conn) ([]byte, int, error) {
-	b := make([]byte, 1000)
-	l, err := conn.Read(b[0:2])
-	if err != nil || l != 2 {
-		return nil, 0, fmt.Errorf("Bad frame format")
-	}
-	payloadLen := binary.LittleEndian.Uint16(b[0:2])
-	if payloadLen > uint16(len(b)) {
-		return nil, 0, fmt.Errorf("payload len too long: [%d]", payloadLen)
-	}
-
-	l, err = conn.Read(b[0:payloadLen])
-	if err != nil || uint16(l) != payloadLen {
-		return nil, 0, fmt.Errorf("Not enought contiguous data")
-	}
-
-	return b[:payloadLen], int(payloadLen), nil
+	b, err := protocol.ReadFrame(conn)
+	return b, len(b), err
 }
 
 func sendSerializedObject(conn net.Conn, obj interface{}) error {
-	b, err := json.Marshal(obj)
-	if err != nil {
-		log.Errorf("failed to serialize data [%s]", err.Error())
-		return err
-	}
-
-	payloadLen := uint16(len(b))
-	l := make([]byte, 2)
-	binary.LittleEndian.PutUint16(l, payloadLen)
-
-	ll, err := conn.Write(l)
-	if uint16(ll) != 2 {
-		return err
-	}
-	ll, err = conn.Write(b)
-	if uint16(ll) != payloadLen {
-		return err
-	}
-
-	return nil
+	return protocol.WriteObject(conn, obj)
 }

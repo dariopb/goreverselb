@@ -1,128 +1,176 @@
 package tunnel
 
 import (
+	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/dariopb/goreverselb/pkg/tunnelcore"
 	"github.com/hashicorp/yamux"
 	log "github.com/sirupsen/logrus"
 )
 
+// ClientOptions configures the control connection, independently of frontend TLS.
+// A nil TLSConfig uses system roots and verifies the endpoint hostname.
+type ClientOptions struct {
+	TLSConfig      *tls.Config
+	DialTimeout    time.Duration
+	ReconnectDelay time.Duration
+}
+
+// LegacyClientOptions explicitly preserves the historical self-signed-server mode.
+// Prefer NewMuxTunnelClientWithOptions with verified TLS for new deployments.
+func LegacyClientOptions() ClientOptions {
+	return ClientOptions{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
+}
+
+func normalizeClientOptions(options ClientOptions) (ClientOptions, error) {
+	if options.DialTimeout < 0 || options.ReconnectDelay < 0 {
+		return options, fmt.Errorf("client timeouts must not be negative")
+	}
+	if options.DialTimeout == 0 {
+		options.DialTimeout = 10 * time.Second
+	}
+	if options.ReconnectDelay == 0 {
+		options.ReconnectDelay = 10 * time.Second
+	}
+	if options.TLSConfig == nil {
+		options.TLSConfig = &tls.Config{}
+	} else {
+		options.TLSConfig = options.TLSConfig.Clone()
+		if options.TLSConfig.RootCAs != nil {
+			options.TLSConfig.RootCAs = options.TLSConfig.RootCAs.Clone()
+		}
+	}
+	if options.TLSConfig.MinVersion == 0 {
+		options.TLSConfig.MinVersion = tls.VersionTLS12
+	}
+	return options, nil
+}
+
 type MuxTunnelClient struct {
 	apiEndpoint     string
 	apiEndpointHost string
+	frontendAddress string
 	tunnelData      TunnelData
 	tlsconfig       *tls.Config
-
 	dialerTimeout   time.Duration
-	connectionCount int
+	reconnectDelay  time.Duration
+	logger          *log.Entry
 	mtx             sync.Mutex
-
-	closeCh chan bool
-	closed  bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	closeOnce       sync.Once
+	wg              sync.WaitGroup
 }
 
-// NewMuxTunnelClient creates a new service frontend
+// NewMuxTunnelClient preserves legacy certificate-verification behavior.
 func NewMuxTunnelClient(apiEndpoint string, td TunnelData) (*MuxTunnelClient, error) {
-	log.Infof("NewTunnelClient to apiEndpoint [%s] with tunnel info: [%v]", apiEndpoint, td)
+	return NewMuxTunnelClientWithOptions(apiEndpoint, td, LegacyClientOptions())
+}
 
-	rand.Seed(time.Now().UnixNano())
-	roots := x509.NewCertPool()
-	//ok := roots.AppendCertsFromPEM([]byte(rootCert))
-	//if !ok {
-	//	log.Fatal("failed to parse root certificate")
-	//}
-	tlsconfig := &tls.Config{RootCAs: roots}
-	//tlsconfig.ServerName = net.SplitHostPort()
-	tlsconfig.InsecureSkipVerify = true
-
+// NewMuxTunnelClientWithOptions starts a reconnecting client. Its zero options
+// verify TLS using system roots and the API endpoint hostname.
+func NewMuxTunnelClientWithOptions(apiEndpoint string, td TunnelData, options ClientOptions) (*MuxTunnelClient, error) {
 	host, _, err := net.SplitHostPort(apiEndpoint)
 	if err != nil {
 		return nil, err
 	}
-
-	tc := MuxTunnelClient{
-		apiEndpoint:     apiEndpoint,
-		apiEndpointHost: host,
-		tunnelData:      td,
-		dialerTimeout:   10 * time.Second,
-		tlsconfig:       tlsconfig,
-
-		connectionCount: td.BackendAcceptBacklog,
-		closeCh:         make(chan bool),
-		closed:          false,
+	if td.BackendAcceptBacklog < 0 {
+		return nil, fmt.Errorf("backend accept backlog must not be negative")
 	}
-
-	if td.BackendAcceptBacklog == 0 {
-		tc.connectionCount = 1
+	options, err = normalizeClientOptions(options)
+	if err != nil {
+		return nil, err
 	}
-
-	for i := 0; i < tc.connectionCount; i++ {
-		go func() {
-			for {
-				tc.addBackendConnection()
-
-				select {
-				case <-tc.closeCh:
-					return
-				default:
-					time.Sleep(10 * time.Second)
-				}
-			}
-		}()
+	if options.TLSConfig.ServerName == "" {
+		options.TLSConfig.ServerName = host
 	}
-
-	return &tc, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	td.TargetAddresses = append([]string(nil), td.TargetAddresses...)
+	tc := &MuxTunnelClient{
+		apiEndpoint: apiEndpoint, apiEndpointHost: host, tunnelData: td,
+		tlsconfig: options.TLSConfig, dialerTimeout: options.DialTimeout,
+		reconnectDelay: options.ReconnectDelay, ctx: ctx, cancel: cancel,
+		logger: log.WithFields(log.Fields{"endpoint": apiEndpoint, "service": td.ServiceName}),
+	}
+	log.Infof("New tunnel client: endpoint [%s], service [%s]", apiEndpoint, td.ServiceName)
+	count := td.BackendAcceptBacklog
+	if count == 0 {
+		count = 1
+	}
+	tc.logger.WithFields(log.Fields{
+		"connections": count, "backend_count": len(td.TargetAddresses), "backend_port": td.TargetPort,
+		"tls_server_name": tc.tlsconfig.ServerName, "verify_tls": !tc.tlsconfig.InsecureSkipVerify,
+		"dial_timeout": tc.dialerTimeout, "reconnect_delay": tc.reconnectDelay,
+	}).Debug("Starting tunnel client")
+	tc.wg.Add(count)
+	for i := 0; i < count; i++ {
+		go tc.run()
+	}
+	return tc, nil
 }
 
-// Close closes the frontends
+func (tc *MuxTunnelClient) run() {
+	defer tc.wg.Done()
+	for tc.ctx.Err() == nil {
+		if err := tc.addBackendConnection(); err != nil && tc.ctx.Err() == nil {
+			log.Errorf("Tunnel connection to [%s] failed: %v", tc.apiEndpoint, err)
+		}
+		if tc.ctx.Err() != nil {
+			return
+		}
+		tc.logger.WithField("reconnect_delay", tc.reconnectDelay).Debug("Waiting to reconnect tunnel")
+		timer := time.NewTimer(tc.reconnectDelay)
+		select {
+		case <-tc.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// Close cancels pending dials, registrations, streams and retries, and waits for
+// the client's goroutines to exit. It is safe to call repeatedly or concurrently.
 func (tc *MuxTunnelClient) Close() {
-	log.Infof("Close to apiEndpoint [%s] with tunnel info: [%v]", tc.apiEndpoint, tc.tunnelData)
-
-	tc.mtx.Lock()
-	tc.closed = true
-
-	close(tc.closeCh)
-	tc.mtx.Unlock()
+	tc.closeOnce.Do(func() {
+		tc.logger.Debug("Stopping tunnel client")
+		tc.cancel()
+	})
+	tc.wg.Wait()
 }
 
 func (tc *MuxTunnelClient) TargetAddresses() []string {
 	tc.mtx.Lock()
-	endpoints := tc.tunnelData.TargetAddresses
-	tc.mtx.Unlock()
-
-	return endpoints
+	defer tc.mtx.Unlock()
+	return append([]string(nil), tc.tunnelData.TargetAddresses...)
 }
 
-// UpdateTargetAddresses updates the list of backend addresses
 func (tc *MuxTunnelClient) UpdateTargetAddresses(addrs []string) {
 	tc.mtx.Lock()
-	tc.tunnelData.TargetAddresses = addrs
+	tc.tunnelData.TargetAddresses = append([]string(nil), addrs...)
 	tc.mtx.Unlock()
 }
 
-// TargetPort returns the current service port
 func (tc *MuxTunnelClient) TargetPort() int {
 	tc.mtx.Lock()
 	defer tc.mtx.Unlock()
 	return tc.tunnelData.TargetPort
 }
 
-// UpdateTargetPort updates the backend target port
 func (tc *MuxTunnelClient) UpdateTargetPort(port int) {
 	tc.mtx.Lock()
 	tc.tunnelData.TargetPort = port
 	tc.mtx.Unlock()
 }
 
-// FrontendPort returns the current frontend port
 func (tc *MuxTunnelClient) FrontendPort() int {
 	tc.mtx.Lock()
 	defer tc.mtx.Unlock()
@@ -130,203 +178,165 @@ func (tc *MuxTunnelClient) FrontendPort() int {
 }
 
 func (tc *MuxTunnelClient) addBackendConnection() error {
-
-	log.Debugf("Trying to reconnect to api server [%s] with tunnel info: [%v]", tc.apiEndpoint, tc)
-	tc.mtx.Lock()
-	if tc.closed {
-		tc.mtx.Unlock()
-		return fmt.Errorf("TunnelListener already closed")
+	tc.logger.Debug("Connecting to tunnel control plane")
+	ctx, cancel := context.WithCancel(tc.ctx)
+	defer cancel()
+	dialCtx, dialCancel := context.WithTimeout(ctx, tc.dialerTimeout)
+	dialer := tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: tc.dialerTimeout},
+		Config:    tc.tlsconfig,
 	}
-	tc.mtx.Unlock()
-
-	dialerTimeout := 10 * time.Second
-	tcpAddr, err := net.ResolveTCPAddr("tcp", tc.apiEndpoint)
+	conn, err := dialer.DialContext(dialCtx, "tcp", tc.apiEndpoint)
+	dialCancel()
 	if err != nil {
-		log.Errorf("failed to resolve server [%s]: %s", tcpAddr, err.Error())
-		return err
+		return fmt.Errorf("control TLS dial: %w", err)
 	}
-
-	d := net.Dialer{Timeout: dialerTimeout}
-	tcpconn, err := d.Dial("tcp", tc.apiEndpoint)
-	if err != nil {
-		log.Errorf("failed to connect to [%s]: %s", tc.apiEndpoint, err.Error())
-		return err
-	}
-	conn := tls.Client(tcpconn, tc.tlsconfig)
-	err = conn.Handshake()
-	if err != nil {
-		log.Errorf("TLS handshake failed: [%s]: %s", tc.apiEndpoint, err.Error())
-		return err
-	}
-
 	defer conn.Close()
-	defer tcpconn.Close()
-
-	// Serialize the tunnel info
+	tc.logger.WithFields(log.Fields{
+		"local_address": conn.LocalAddr().String(), "remote_address": conn.RemoteAddr().String(),
+	}).Debug("Control TLS connection established")
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
-		log.Errorf("Failed to establish session: [%s]: %s", tc.apiEndpoint, err.Error())
-		return err
+		return fmt.Errorf("establish session: %w", err)
 	}
-	defer session.Close()
-
-	stream, err := session.Open()
-	if err != nil {
-		log.Errorf("Failed to create controller stream: [%s]: %s", tc.apiEndpoint, err.Error())
-		return err
-	}
-	defer stream.Close()
-
-	o := json.NewEncoder(stream)
-
-	err = o.Encode(tc.tunnelData)
-	if err != nil {
-		log.Errorf("Failed sending tunnel info:[%s], stream:[%s], error: %s", session.RemoteAddr().String(), tc.apiEndpoint, err.Error())
-		return err
-	}
-
-	log.Infof("Added backend connection [%s] with tunnel info: [%v]", conn.LocalAddr().String(), tc.tunnelData)
-
-	// Accept a new stream
-	go func() {
-		for {
-			stream, err := session.Accept()
-			if err != nil {
-				log.Info("tunnel client service session accept error", err)
-				break
-			}
-
-			go tc.handleStream(session, stream)
-		}
-	}()
-
-	in := json.NewDecoder(stream)
-
-	var tdr TunnelDataResponse
-	err = in.Decode(&tdr)
-	if err != nil {
-		err := fmt.Errorf("failed to deserialize tunnel info [%s]", err.Error())
-		log.Error(err.Error())
-		return err
-	}
-
-	if tdr.Error != "" {
-		err := fmt.Errorf("Tunnel failed to setup frontend: [%s] => [%s]", tdr.ServiceName, tdr.Error)
-		log.Error(err.Error())
-		return err
-	}
-
-	tc.mtx.Lock()
-	tc.tunnelData.FrontendData.Port = tdr.FrontendPort
-	tc.mtx.Unlock()
-	log.Infof("Tunnel ready on frontend: [%s] => [%s:%d]", tdr.ServiceName, tc.apiEndpointHost, tdr.FrontendPort)
-
-	// check for closed session (closed/keepalive failed/etc) or shutdown
-loop:
-	for {
-		select {
-		case <-time.After(5 * time.Second):
-			if session.IsClosed() {
-				break loop
-			}
-		case <-tc.closeCh:
-			break loop
-		}
-	}
-
-	return nil
-}
-
-func (tc *MuxTunnelClient) handleStream(session *yamux.Session, conn net.Conn) {
-	log.Debugf("session: [%s], new stream connection from: %s", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
-
+	var streams sync.WaitGroup
 	defer func() {
-		conn.Close()
-		log.Debugf("session: [%s], stream from [%s] ended", tc.tunnelData.ServiceName, conn.RemoteAddr().String())
+		cancel()
+		_ = session.Close()
+		streams.Wait()
 	}()
-
-	b, payloadLen, err := readFrame(conn)
+	// Also bound Open(), whose initial send is not controlled by stream deadlines.
+	registrationTimer := time.AfterFunc(tc.dialerTimeout, func() { _ = conn.Close() })
+	defer registrationTimer.Stop()
+	control, err := session.Open()
 	if err != nil {
-		log.Errorf("readFrame error: [%s]", err.Error())
-		return
+		return fmt.Errorf("open control stream: %w", err)
 	}
-
-	// Deserialize the tunnel info
-	var td TunnelConnecData
-	err = json.Unmarshal(b[0:payloadLen], &td)
-	if err != nil {
-		log.Errorf("failed to deserialize tunnel connect data [%s]", err.Error())
-		return
+	defer control.Close()
+	tc.logger.WithFields(tunnelStreamFields(control)).Debug("Yamux control stream opened")
+	if err := control.SetDeadline(time.Now().Add(tc.dialerTimeout)); err != nil {
+		return err
 	}
-
-	log.Debugf("session: [%s], new stream connection from: [%s] via [%s]", td.ServiceName, td.SourceAddress, conn.RemoteAddr().String())
-
-	err = tc.doProxy(conn)
-	if err == nil {
-	}
-}
-
-func (tc *MuxTunnelClient) doProxy(conn net.Conn) error {
-	var addr string
 	tc.mtx.Lock()
-
-	// Pick a random backend
-	l := len(tc.tunnelData.TargetAddresses)
-	if l == 0 {
-		tc.mtx.Unlock()
-		return nil
-	}
-
-	addr = tc.tunnelData.TargetAddresses[rand.Intn(l)]
+	td := tc.tunnelData
+	td.TargetAddresses = append([]string(nil), td.TargetAddresses...)
 	tc.mtx.Unlock()
-
-	addr = fmt.Sprintf("%s:%d", addr, tc.tunnelData.TargetPort)
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		log.Errorf("session: [%s], failed to resolve server [%s]: %s", tc.tunnelData.ServiceName, tcpAddr.String(), err.Error())
+	tc.logger.WithFields(log.Fields{
+		"requested_frontend_port": td.FrontendData.Port,
+		"tls_wrap":                td.FrontendData.TLSWrap, "ssh_wrap": td.FrontendData.SSHWrap,
+	}).Debug("Registering tunnel")
+	if err := json.NewEncoder(control).Encode(td); err != nil {
+		return fmt.Errorf("send registration: %w", err)
+	}
+	var response TunnelDataResponse
+	if err := json.NewDecoder(control).Decode(&response); err != nil {
+		return fmt.Errorf("read registration response: %w", err)
+	}
+	if response.Error != "" {
+		return fmt.Errorf("registration rejected for service %q: %s", td.ServiceName, response.Error)
+	}
+	registrationTimer.Stop()
+	if err := control.SetDeadline(time.Time{}); err != nil {
 		return err
 	}
-
-	d := net.Dialer{Timeout: tc.dialerTimeout}
-	backConn, err := d.Dial("tcp", tcpAddr.String())
-	if err != nil {
-		log.Errorf("session: [%s], failed to connect to [%s]: %s", tc.tunnelData.ServiceName, tcpAddr.String(), err.Error())
-		return err
+	tc.mtx.Lock()
+	tc.tunnelData.FrontendData.Port = response.FrontendPort
+	tc.frontendAddress = ""
+	if response.FrontendPort > 0 {
+		host := response.FrontendAddress
+		if host == "" {
+			host = tc.apiEndpointHost
+		}
+		tc.frontendAddress = net.JoinHostPort(host, strconv.Itoa(response.FrontendPort))
 	}
-
-	done := make(chan error, 2)
-
-	go func() {
-		l, err := tc.copybytes(backConn, conn)
-		log.Debugf("proxy connection [%s] finished content -> back (bytes %d, error: [%v]", tc.tunnelData.ServiceName, l, err)
-		done <- err
-	}()
-
-	go func() {
-		l, err := tc.copybytes(conn, backConn)
-		log.Debugf("proxy connection [%s] finished back -> content (bytes %d, error: [%v]", tc.tunnelData.ServiceName, l, err)
-		done <- err
-	}()
-
-	// Wait for both directions to finish
-	err = <-done
-	err = <-done
-
-	return nil
+	tc.mtx.Unlock()
+	tc.logger.WithFields(tunnelStreamFields(control)).WithFields(log.Fields{
+		"frontend_port": response.FrontendPort, "publication_mode": response.PublicationMode,
+	}).Debug("Tunnel registration accepted")
+	if response.PublicationMode == "bindings_only" {
+		log.Infof("Tunnel binding ready: [%s] (no dedicated frontend)", response.ServiceName)
+	} else {
+		host := response.FrontendAddress
+		if host == "" {
+			host = tc.apiEndpointHost
+		}
+		log.Infof("Tunnel ready on frontend: [%s] => [%s]", response.ServiceName, net.JoinHostPort(host, strconv.Itoa(response.FrontendPort)))
+	}
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			return err
+		}
+		streams.Add(1)
+		go func() {
+			defer streams.Done()
+			tc.handleStream(ctx, stream)
+		}()
+	}
 }
 
-func (tc *MuxTunnelClient) copybytes(dst, src net.Conn) (written int64, err error) {
-	written, err = io.Copy(dst, src)
-
-	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-	} else {
-		_ = dst.Close()
+func (tc *MuxTunnelClient) handleStream(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+	logger := tc.logger.WithFields(tunnelStreamFields(conn))
+	logger.Debug("Receiving tunnel stream metadata")
+	if err := conn.SetReadDeadline(time.Now().Add(tc.dialerTimeout)); err != nil {
+		logger.WithError(err).Error("Set tunnel metadata deadline")
+		return
 	}
-
-	if cr, ok := src.(interface{ CloseRead() error }); ok {
-		_ = cr.CloseRead()
+	b, _, err := readFrame(conn)
+	if err != nil {
+		logger.WithError(err).Error("Read tunnel metadata")
+		return
 	}
+	var td TunnelConnecData
+	if err := json.Unmarshal(b, &td); err != nil {
+		logger.WithError(err).Error("Decode tunnel metadata")
+		return
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		logger.WithError(err).Error("Clear tunnel metadata deadline")
+		return
+	}
+	tc.mtx.Lock()
+	frontendPort, frontendAddress := tc.tunnelData.FrontendData.Port, tc.frontendAddress
+	tc.mtx.Unlock()
+	logger = logger.WithFields(log.Fields{
+		"source_address": td.SourceAddress, "registered_service": td.ServiceName,
+		"frontend_port": frontendPort, "frontend_address": frontendAddress,
+	})
+	logger.Debug("Accepted tunnel stream")
+	if err := tc.doProxy(ctx, conn, logger); err != nil && ctx.Err() == nil {
+		logger.WithError(err).Error("Proxy tunnel stream failed")
+	}
+}
 
-	return written, err
+func (tc *MuxTunnelClient) doProxy(ctx context.Context, conn net.Conn, logger *log.Entry) error {
+	tc.mtx.Lock()
+	if len(tc.tunnelData.TargetAddresses) == 0 {
+		tc.mtx.Unlock()
+		return fmt.Errorf("no backend target addresses configured")
+	}
+	host := tc.tunnelData.TargetAddresses[rand.Intn(len(tc.tunnelData.TargetAddresses))]
+	port := tc.tunnelData.TargetPort
+	tc.mtx.Unlock()
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	logger = logger.WithField("backend", addr)
+	logger.Debug("Opening backend connection")
+	dialer := net.Dialer{Timeout: tc.dialerTimeout}
+	backend, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial backend %s: %w", addr, err)
+	}
+	defer backend.Close()
+	logger = logger.WithFields(log.Fields{
+		"backend_local": backend.LocalAddr().String(), "backend_remote": backend.RemoteAddr().String(),
+	})
+	logger.Debug("Backend connection established")
+	started := time.Now()
+	err = tunnelcore.ProxyWithObserver(ctx, conn, backend,
+		logTunnelCopy(logger, "tunnel_to_backend", "backend_to_tunnel", started))
+	logger.WithField("duration", time.Since(started)).Debug("Tunnel stream finished")
+	return err
 }

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"crypto/tls"
@@ -19,6 +20,7 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 
+	"github.com/dariopb/goreverselb/pkg/tunnelcore"
 	"github.com/gliderlabs/ssh"
 	"github.com/hashicorp/yamux"
 	log "github.com/sirupsen/logrus"
@@ -150,6 +152,7 @@ type MuxTunnelService struct {
 	closeCh          chan bool
 	closeOnce        sync.Once
 	tunnelListener   net.Listener
+	muxRawConns      map[net.Conn]struct{}
 	sshSigner        gossh.Signer
 
 	sshBackendListener  net.Listener
@@ -196,7 +199,7 @@ func NewMuxTunnelService(configData *ConfigData, cert tls.Certificate, servicePo
 	tlsconfig := &tls.Config{Certificates: []tls.Certificate{ts.cert}}
 	listener, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", ts.port), tlsconfig)
 	if err != nil {
-		log.Fatal("tunnel service listener error:", err)
+		return nil, fmt.Errorf("tunnel service listener: %w", err)
 	}
 
 	ts.tunnelListener = listener
@@ -223,19 +226,35 @@ func (ts *MuxTunnelService) Close() {
 		close(ts.closeCh)
 
 		ts.mtx.Lock()
+		var listeners []net.Listener
+		var conns []net.Conn
 		if ts.tunnelListener != nil {
-			_ = ts.tunnelListener.Close()
+			listeners = append(listeners, ts.tunnelListener)
 		}
 		if ts.sshBackendListener != nil {
-			_ = ts.sshBackendListener.Close()
+			listeners = append(listeners, ts.sshBackendListener)
 		}
 		for conn := range ts.sshBackendRawConns {
-			_ = conn.Close()
+			conns = append(conns, conn)
+		}
+		for conn := range ts.muxRawConns {
+			conns = append(conns, conn)
 		}
 		for _, frontend := range ts.sshReverseFrontends {
-			_ = frontend.listener.Close()
+			listeners = append(listeners, frontend.listener)
+		}
+		for _, services := range ts.frontendMap {
+			for _, frontend := range services {
+				listeners = append(listeners, frontend.listener)
+			}
 		}
 		ts.mtx.Unlock()
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
 	})
 }
 
@@ -265,6 +284,24 @@ func (ts *MuxTunnelService) GetServices(userID string) map[string]TunnelFrontend
 }
 
 func (ts *MuxTunnelService) handleMuxConnection(conn net.Conn) {
+	ts.mtx.Lock()
+	select {
+	case <-ts.closeCh:
+		ts.mtx.Unlock()
+		_ = conn.Close()
+		return
+	default:
+	}
+	if ts.muxRawConns == nil {
+		ts.muxRawConns = make(map[net.Conn]struct{})
+	}
+	ts.muxRawConns[conn] = struct{}{}
+	ts.mtx.Unlock()
+	defer func() {
+		ts.mtx.Lock()
+		delete(ts.muxRawConns, conn)
+		ts.mtx.Unlock()
+	}()
 	log.Infof("MuxTunnelService: new connection from: %s", conn.RemoteAddr().String())
 
 	defer conn.Close()
@@ -361,7 +398,6 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 			return
 		}
 		td.FrontendData.Port = port
-		td.FrontendData.auto = true
 	}
 
 	if val == nil || val.port != td.FrontendData.Port {
@@ -389,6 +425,20 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 
 	val.backendConnMap[instanceName][session.RemoteAddr().String()] = session
 	ts.mtx.Unlock()
+	defer func() {
+		ts.mtx.Lock()
+		defer ts.mtx.Unlock()
+		delete(val.backendConnMap[instanceName], session.RemoteAddr().String())
+		if len(val.backendConnMap[instanceName]) == 0 {
+			delete(val.backendConnMap, instanceName)
+		}
+		if len(val.backendConnMap) == 0 {
+			_ = val.listener.Close()
+			if fem := ts.frontendMap[userID]; fem[serviceName] == val {
+				delete(fem, serviceName)
+			}
+		}
+	}()
 
 	// Send the response so the client will get the endpoint info
 	err = ts.sendResponse(&td, out, nil)
@@ -397,32 +447,10 @@ func (ts *MuxTunnelService) handleStream(session *yamux.Session, conn net.Conn) 
 		return
 	}
 
-	// check for closed session (closed/keepalive failed/etc) or shutdown
-loop:
-	for {
-		select {
-		case <-time.After(10 * time.Second):
-			if session.IsClosed() {
-				break loop
-			}
-		case <-ts.closeCh:
-			break loop
-		}
+	select {
+	case <-session.CloseChan():
+	case <-ts.closeCh:
 	}
-
-	ts.mtx.Lock()
-	delete(val.backendConnMap[instanceName], session.RemoteAddr().String())
-	if len(val.backendConnMap[instanceName]) == 0 {
-		delete(val.backendConnMap, instanceName)
-	}
-
-	if len(val.backendConnMap) == 0 {
-		val.listener.Close()
-		if fem, ok := ts.frontendMap[userID]; ok {
-			delete(fem, serviceName)
-		}
-	}
-	ts.mtx.Unlock()
 
 	l.Debugf("finished: service: [%s:%s], listen port: [%d]",
 		serviceName, instanceName, td.FrontendData.Port)
@@ -533,8 +561,7 @@ func (ts *MuxTunnelService) startFrontend(userID string, serviceName string, ins
 				l.Info("Upgrading frontend connection to TLS")
 				tlsconfig := &tls.Config{Certificates: []tls.Certificate{ts.cert}}
 				tlsconn := tls.Server(conn, tlsconfig)
-				err = tlsconn.Handshake()
-				if err != nil {
+				if err := tlsconn.Handshake(); err != nil {
 					l.Errorf("TLS handshake error: [%s]", err.Error())
 					conn.Close()
 					continue
@@ -639,6 +666,17 @@ func (ts *MuxTunnelService) directTCPIPHandler(srv *ssh.Server,
 }
 
 func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName string, conn net.Conn) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ts.closeCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	l := log.WithFields(log.Fields{
 		"frontend": serviceName,
 		"local":    conn.LocalAddr().String(),
@@ -722,38 +760,43 @@ func (ts *MuxTunnelService) doProxy(userID, serviceName string, instanceName str
 	}
 	ts.mtx.Unlock()
 
+	go func() {
+		select {
+		case <-session.CloseChan():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	// Connect to the backend endpoint
 	backConn, err := ts.connectBackend(session, conn, serviceName, instanceName)
 	if err != nil {
+		l.WithError(err).Error("Open tunnel backend failed")
 		return
 	}
+	defer backConn.Close()
+	l = l.WithFields(tunnelStreamFields(backConn)).WithFields(log.Fields{
+		"user_id": userID, "instance": instanceName,
+		"source_address": conn.RemoteAddr().String(), "frontend_address": conn.LocalAddr().String(),
+	})
+	l.Debug("Selected tunnel backend")
 
 	// Send the first leg that I saved, if needed
 	if b != nil {
 		count, err = backConn.Write(b)
 		if count != len(b) || err != nil {
+			l.WithFields(log.Fields{"bytes": count, "expected_bytes": len(b)}).
+				WithError(err).Error("Replay frontend bytes failed")
 			backConn.Close()
 			return
 		}
+		l.WithField("bytes", count).Debug("Replayed frontend bytes")
 	}
 
-	done := make(chan error, 2)
-
-	go func() {
-		l, err := ts.copybytes(serviceName, id, backConn, conn)
-		log.Debugf("proxy connection [%s] finished front -> back (bytes %d, error: [%v]", id, l, err)
-		done <- err
-	}()
-
-	go func() {
-		l, err := ts.copybytes(serviceName, id, conn, backConn)
-		log.Debugf("proxy connection [%s] finished back -> front (bytes %d, error: [%v]", id, l, err)
-		done <- err
-	}()
-
-	// Wait for both directions to finish
-	err = <-done
-	err = <-done
+	if err := tunnelcore.ProxyWithObserver(ctx, conn, backConn,
+		logTunnelCopy(l, "frontend_to_tunnel", "tunnel_to_frontend", time.Now())); err != nil && ctx.Err() == nil {
+		l.Debugf("proxy connection [%s] ended: %v", id, err)
+	}
 }
 
 // Read the first packet and try to identify if there is any sni type of redirection that could be used.
@@ -770,6 +813,9 @@ func (ts *MuxTunnelService) getSNITarget(serviceName string, conn net.Conn) (str
 	if err != nil {
 		return "", nil, err
 	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return "", nil, err
+	}
 	b = b[:n]
 
 	// try TLS
@@ -782,10 +828,6 @@ func (ts *MuxTunnelService) getSNITarget(serviceName string, conn net.Conn) (str
 	} else if serverName := ts.tryHTTPProxyDecode(b, conn); len(serverName) > 0 {
 		sn = serverName
 		return sn, nil, nil
-	}
-
-	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		return "", nil, err
 	}
 
 	return sn, b, nil
@@ -940,6 +982,7 @@ func (ts *MuxTunnelService) connectBackend(session *yamux.Session, conn net.Conn
 	}
 	err = sendSerializedObject(backConn, tunnelConnect)
 	if err != nil {
+		_ = backConn.Close()
 		return nil, err
 	}
 

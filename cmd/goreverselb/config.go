@@ -25,6 +25,8 @@ type Config struct {
 	ServiceName     string
 	InstanceName    string
 	InsecureTLS     bool
+	TLSCAFile       string
+	TLSServerName   string
 
 	// TunnelGroup options
 	ServiceGroupJSON string

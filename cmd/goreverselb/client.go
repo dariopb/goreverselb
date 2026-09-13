@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -32,12 +33,12 @@ func client(ctx *cli.Context) error {
 
 	h, p, err := net.SplitHostPort(cfg.ServiceEndpoint)
 	if err != nil {
-		log.Fatalf("wrong format for endpoint: %v", err)
+		return fmt.Errorf("wrong format for endpoint: %w", err)
 	}
 
-	port, _ := strconv.Atoi(p)
-	if err != nil {
-		log.Fatalf("wrong format for endpoint: %v", err)
+	port, err := strconv.Atoi(p)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid backend port %q", p)
 	}
 
 	serviceName := cfg.ServiceName
@@ -58,10 +59,19 @@ func client(ctx *cli.Context) error {
 		TargetAddresses: []string{h},
 	}
 
-	tunnel.NewMuxTunnelClient(cfg.APIEndpoint, td)
+	options, err := clientOptions(ctx)
+	if err != nil {
+		return err
+	}
+	tc, err := tunnel.NewMuxTunnelClientWithOptions(cfg.APIEndpoint, td, options)
+	if err != nil {
+		return err
+	}
+	defer tc.Close()
 
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(c)
 
 	<-c
 
