@@ -1,0 +1,41 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  standalone:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - run: go test -vet=off ./...
+      - run: go build ./cmd/goreverselb
+
+  caddy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: |
+            go.sum
+            caddy/go.sum
+            cmd/caddy-reverselb/go.sum
+      - run: GOWORK=off go test -race ./...
+        working-directory: caddy
+      - run: GOWORK=off go vet ./...
+        working-directory: caddy
+      - run: GOWORK=off go build -o caddy-reverselb .
+        working-directory: cmd/caddy-reverselb
+      - run: go build -v ./cmd/caddy-reverselb
+      - run: ./caddy-reverselb list-modules

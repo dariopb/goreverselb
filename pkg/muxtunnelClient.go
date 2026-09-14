@@ -63,6 +63,9 @@ type MuxTunnelClient struct {
 	dialerTimeout   time.Duration
 	reconnectDelay  time.Duration
 	logger          *log.Entry
+	connections     []ClientConnectionStatus
+	statusChanged   chan struct{}
+	statusClosed    bool
 	mtx             sync.Mutex
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -105,6 +108,11 @@ func NewMuxTunnelClientWithOptions(apiEndpoint string, td TunnelData, options Cl
 	if count == 0 {
 		count = 1
 	}
+	tc.connections = make([]ClientConnectionStatus, count)
+	tc.statusChanged = make(chan struct{})
+	for i := range tc.connections {
+		tc.connections[i] = ClientConnectionStatus{ID: i, State: ClientStateConnecting, UpdatedAt: time.Now().UTC()}
+	}
 	tc.logger.WithFields(log.Fields{
 		"connections": count, "backend_count": len(td.TargetAddresses), "backend_port": td.TargetPort,
 		"tls_server_name": tc.tlsconfig.ServerName, "verify_tls": !tc.tlsconfig.InsecureSkipVerify,
@@ -112,16 +120,17 @@ func NewMuxTunnelClientWithOptions(apiEndpoint string, td TunnelData, options Cl
 	}).Debug("Starting tunnel client")
 	tc.wg.Add(count)
 	for i := 0; i < count; i++ {
-		go tc.run()
+		go tc.run(i)
 	}
 	return tc, nil
 }
 
-func (tc *MuxTunnelClient) run() {
+func (tc *MuxTunnelClient) run(id int) {
 	defer tc.wg.Done()
 	for tc.ctx.Err() == nil {
-		if err := tc.addBackendConnection(); err != nil && tc.ctx.Err() == nil {
-			log.Errorf("Tunnel connection to [%s] failed: %v", tc.apiEndpoint, err)
+		tc.setConnectionState(id, ClientStateConnecting, nil)
+		if err := tc.addBackendConnection(id); err != nil && tc.ctx.Err() == nil {
+			log.Errorf("Tunnel connection to [%s] failed: %s", tc.apiEndpoint, redactClientError(err, tc.tunnelData.Token))
 		}
 		if tc.ctx.Err() != nil {
 			return
@@ -142,6 +151,15 @@ func (tc *MuxTunnelClient) run() {
 func (tc *MuxTunnelClient) Close() {
 	tc.closeOnce.Do(func() {
 		tc.logger.Debug("Stopping tunnel client")
+		tc.mtx.Lock()
+		tc.statusClosed = true
+		for i := range tc.connections {
+			conn := &tc.connections[i]
+			conn.State, conn.UpdatedAt = ClientStateClosed, time.Now().UTC()
+			conn.FrontendPort, conn.FrontendAddress, conn.PublicationMode = 0, "", ""
+		}
+		tc.notifyStatusLocked()
+		tc.mtx.Unlock()
 		tc.cancel()
 	})
 	tc.wg.Wait()
@@ -171,42 +189,52 @@ func (tc *MuxTunnelClient) UpdateTargetPort(port int) {
 	tc.mtx.Unlock()
 }
 
+// FrontendPort returns the legacy requested/last-reported port, even before
+// registration or after disconnection. Use Status or WaitReady for readiness
+// and the currently confirmed frontend.
 func (tc *MuxTunnelClient) FrontendPort() int {
 	tc.mtx.Lock()
 	defer tc.mtx.Unlock()
 	return tc.tunnelData.FrontendData.Port
 }
 
-func (tc *MuxTunnelClient) addBackendConnection() error {
+func (tc *MuxTunnelClient) addBackendConnection(id int) (err error) {
 	tc.logger.Debug("Connecting to tunnel control plane")
 	ctx, cancel := context.WithCancel(tc.ctx)
-	defer cancel()
+	var conn net.Conn
+	var session *yamux.Session
+	var streams sync.WaitGroup
+	defer func() {
+		tc.setConnectionState(id, ClientStateReconnecting, err)
+		cancel()
+		if session != nil {
+			_ = session.Close()
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+		streams.Wait()
+	}()
 	dialCtx, dialCancel := context.WithTimeout(ctx, tc.dialerTimeout)
 	dialer := tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: tc.dialerTimeout},
 		Config:    tc.tlsconfig,
 	}
-	conn, err := dialer.DialContext(dialCtx, "tcp", tc.apiEndpoint)
+	conn, err = dialer.DialContext(dialCtx, "tcp", tc.apiEndpoint)
 	dialCancel()
 	if err != nil {
 		return fmt.Errorf("control TLS dial: %w", err)
 	}
-	defer conn.Close()
+	tc.setConnectionState(id, ClientStateRegistering, nil)
 	tc.logger.WithFields(log.Fields{
 		"local_address": conn.LocalAddr().String(), "remote_address": conn.RemoteAddr().String(),
 	}).Debug("Control TLS connection established")
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
-	session, err := yamux.Client(conn, nil)
+	session, err = yamux.Client(conn, nil)
 	if err != nil {
 		return fmt.Errorf("establish session: %w", err)
 	}
-	var streams sync.WaitGroup
-	defer func() {
-		cancel()
-		_ = session.Close()
-		streams.Wait()
-	}()
 	// Also bound Open(), whose initial send is not controlled by stream deadlines.
 	registrationTimer := time.AfterFunc(tc.dialerTimeout, func() { _ = conn.Close() })
 	defer registrationTimer.Stop()
@@ -214,12 +242,15 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 	if err != nil {
 		return fmt.Errorf("open control stream: %w", err)
 	}
-	defer control.Close()
 	tc.logger.WithFields(tunnelStreamFields(control)).Debug("Yamux control stream opened")
 	if err := control.SetDeadline(time.Now().Add(tc.dialerTimeout)); err != nil {
 		return err
 	}
 	tc.mtx.Lock()
+	if tc.statusClosed {
+		tc.mtx.Unlock()
+		return net.ErrClosed
+	}
 	td := tc.tunnelData
 	td.TargetAddresses = append([]string(nil), td.TargetAddresses...)
 	tc.mtx.Unlock()
@@ -242,6 +273,10 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 		return err
 	}
 	tc.mtx.Lock()
+	if tc.statusClosed {
+		tc.mtx.Unlock()
+		return net.ErrClosed
+	}
 	tc.tunnelData.FrontendData.Port = response.FrontendPort
 	tc.frontendAddress = ""
 	if response.FrontendPort > 0 {
@@ -251,6 +286,12 @@ func (tc *MuxTunnelClient) addBackendConnection() error {
 		}
 		tc.frontendAddress = net.JoinHostPort(host, strconv.Itoa(response.FrontendPort))
 	}
+	tc.connections[id] = ClientConnectionStatus{
+		ID: id, State: ClientStateReady, FrontendPort: response.FrontendPort,
+		FrontendAddress: tc.frontendAddress, PublicationMode: response.PublicationMode,
+		UpdatedAt: time.Now().UTC(),
+	}
+	tc.notifyStatusLocked()
 	tc.mtx.Unlock()
 	tc.logger.WithFields(tunnelStreamFields(control)).WithFields(log.Fields{
 		"frontend_port": response.FrontendPort, "publication_mode": response.PublicationMode,

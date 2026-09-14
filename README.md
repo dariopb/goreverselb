@@ -30,13 +30,18 @@ REVLB_TOKEN='replace-with-a-secret' ./caddy-reverselb run \
   --config caddy/examples/dynamic.Caddyfile --adapter caddyfile
 ```
 
-The Caddy application and plugin are separate Go modules requiring Go 1.26.
+All three modules now require Go 1.26 after the dependency refresh.
+The Caddy application and plugin remain separate Go modules.
 The checked-in `go.work` makes all three modules buildable from the repository
 root. The workspace uses Go 1.26 and a combined dependency selection, without
 adding Caddy requirements to the standalone `go.mod`. To build the standalone
 module with only its own dependencies/toolchain settings, use
 `GOWORK=off go build ./cmd/goreverselb`. Module-local builds also remain supported:
 `cd cmd/caddy-reverselb && GOWORK=off go build .`.
+The latest published Caddy and caddy-l4 releases are currently pinned at
+`v2.11.4` and `v0.1.2`. Other dependencies are updated to compatible releases;
+`automemlimit` stays at `v0.7.5` and `cel-go` at `v0.28.1` because newer versions
+remove APIs used by Caddy. No Caddy fork is required.
 The plugin is importable
 as `github.com/dariopb/goreverselb/caddy`; local third-party builds can also use:
 
@@ -56,7 +61,8 @@ client certificate verification.
 
 For a remote deployment, change `advertise_host` and the control TLS identity
 and configure the appropriate certificate/trust policy. Supplied certificates
-can use `apps.tls.certificates.load_files` in native JSON. Public certificate
+can use the Caddyfile `certificate` directive below or
+`apps.tls.certificates.load_files` in native JSON. Public certificate
 automation is opt-in and requires working ACME challenge routing or an
 appropriate issuer.
 
@@ -121,8 +127,9 @@ dispatch. A direct template allows one distinct instance per service, with
 multiple sessions for that instance. Native JSON additionally supports
 `allowed_sources`, operator-supplied `middleware`, and HTTP `upstream` settings.
 Static `bindings_only` mode remains available for operator-defined shared
-listeners. Consumer-facing `SSHWrap` and SSH remote-forward registration in
-Caddy are not supported; use the standalone server for those features.
+listeners. Consumer-facing `SSHWrap` is available through opt-in TCP templates
+as described below. SSH remote-forward registration (`ssh -R`) in Caddy is
+still unsupported; use the standalone server for that separate feature.
 
 The full design and release acceptance criteria remain in
 [spec-caddy-l4integration.md](spec-caddy-l4integration.md). This implementation
@@ -136,6 +143,141 @@ Exhaustive version-matrix, capacity, crash-recovery, and shared-port validation
 remain required before a production release. The current plugin's local-module
 replacements are for checkout builds; published plugin distribution also
 requires releasing the updated root module and pinning that release.
+
+### Certificate files in one Caddyfile
+
+Inside your existing `goreverselb` global block, add a certificate-chain file
+and its matching private key:
+
+```caddyfile
+certificate /etc/ssl/certs/apps-fullchain.pem /etc/ssl/private/apps-key.pem
+```
+
+Use the **`goreverselb-caddyfile` adapter** with this directive. It first runs
+Caddy's standard Caddyfile adapter, then merges the file pair into
+`apps.tls.certificates.load_files`. There is still only one source Caddyfile;
+no manual JSON editing, dummy site, static frontend listener, or Caddy fork is
+needed. Existing regular sites, their certificate-selection tags, other
+certificate loaders, and TLS/PKI policies are retained.
+
+The directive is repeatable for multiple certificates. Quote paths containing
+spaces. Absolute paths are recommended; relative paths are resolved from the
+Caddy process's working directory. Standard Caddyfile environment substitutions
+and imports remain supported. Only file paths appear in active configuration,
+not the PEM contents. Caddy must have permission to read both files; keep the
+private key restricted.
+
+[certificates.Caddyfile](caddy/examples/certificates.Caddyfile) is a complete
+example for `multi-1.apps.cloudexmaquina.com`, control port `9000`, and a pool
+including frontend port `7445`. Set `REVLB_TOKEN` to your registration token,
+then run:
+
+```sh
+export REVLB_CERT_FILE=/etc/ssl/certs/apps-fullchain.pem
+export REVLB_KEY_FILE=/etc/ssl/private/apps-key.pem
+./caddy-reverselb run \
+  --config caddy/examples/certificates.Caddyfile \
+  --adapter goreverselb-caddyfile
+```
+
+Register the service from the backend machine:
+
+```sh
+./goreverselb -t "$REVLB_TOKEN" tunnel \
+  -e multi-1.apps.cloudexmaquina.com:9000 \
+  -s multi-1 --frontendport 7445 --wraptls --insecuretls=false \
+  -b 127.0.0.1:8080
+```
+
+Resolve the hostname to Caddy, then visit
+`https://multi-1.apps.cloudexmaquina.com:7445`. A valid
+`*.apps.cloudexmaquina.com` certificate covers both the control TLS identity and
+the frontend. The example does not request new certificates; supplied files
+are renewed externally. For a private CA, add `--tlscafile /path/to/ca.pem`
+to the tunnel command and trust that CA on consumer machines.
+
+After replacing certificate files, force a reload so unchanged file paths are
+read again:
+
+```sh
+./caddy-reverselb reload \
+  --config caddy/examples/certificates.Caddyfile \
+  --adapter goreverselb-caddyfile \
+  --address 127.0.0.1:2020 --force
+```
+
+Missing, malformed, or mismatched files fail Caddy provisioning instead of
+silently falling back to certificate issuance. A rejected reload leaves the
+existing configuration active. Reloading source policy may briefly interrupt
+new frontend connections while reconciliation restores the recorded ports;
+live tunnel sessions are retained. Using `--adapter caddyfile` with `certificate`
+directives fails with guidance to select the extended adapter. Caddyfiles
+without this directive still work with the standard adapter; native JSON still
+uses Caddy's standard certificate loader directly.
+
+### SSH-wrapped Caddy frontends
+
+Add a rule and template inside the existing `publication dynamic` block:
+
+```caddyfile
+rule default@none ssh-* wrapped-ssh
+
+template wrapped-ssh {
+	kind tcp
+	instance_dispatch direct
+	frontend_ssh on
+}
+```
+
+Keep the other templates and default unchanged. Reload Caddy, then register:
+
+```sh
+./goreverselb -l debug -t "$REVLB_TOKEN" tunnel \
+  -e localhost:9999 -s ssh-web -b 127.0.0.1:8080 --wrapSSH
+```
+
+From the consumer machine, substitute the allocated frontend port for `8000`:
+
+```sh
+ssh -N -p 8000 -L 127.0.0.1:3000:localhost:8080 anyuser@192.168.1.166
+```
+
+Connecting to `http://127.0.0.1:3000` then reaches the registered backend.
+Caddy/caddy-l4 owns the dynamic listener; the `goreverselb_ssh` handler terminates
+SSH and sends each `direct-tcpip` channel through the ordinary L4 routing and
+goreverselb session-selection path. The requested SSH destination is metadata,
+not permission to dial arbitrary hosts: only the registered tunnel backend is
+reachable. Multiple channels independently select tunnel sessions and preserve
+half-closes. A connection permits up to 32 concurrent forwarding/session channels.
+
+**As with standalone `--wrapSSH`, any username/password is accepted. This is
+encryption, not consumer authentication or access control.** The registration
+token still protects tunnel registration, not SSH consumer access. Restrict
+exposure with a firewall or the template's `allowed_sources`. Passwords and
+payloads are never logged. Passkey/token-based consumer authentication is not
+implemented yet.
+
+The Ed25519 host key persists in Caddy storage at
+`goreverselb/<runtime_id>/ssh_host_key`, separately from the standalone
+`revlb_ssh_host_key`. Verify the logged SHA256 host-key fingerprint before
+accepting a new host identity. Do not expose or commit either private key.
+
+`frontend_ssh` (also the native JSON field name) requires `kind tcp`; it cannot
+be combined with `frontend_tls`. HTTP applications work through an SSH-wrapped
+TCP template, rather than Caddy's HTTP reverse proxy. Both enabled and disabled
+wrapping requests must match the selected template. `instance_dispatch sni`
+matches TLS inside each decrypted SSH forwarding channel, while `legacy`
+consumes its `PROXY->` or HTTP CONNECT preamble. Neither mode routes using the
+SSH username or the `ssh -L` destination. A channel routing deadline closes
+only that channel, not sibling channels. Existing service sessions must be
+disconnected before changing their template.
+
+Existing forwarding logs remain: source/frontend addresses, tunnel endpoints
+and stream ID, backend addresses, directional bytes, duration and errors.
+SSH adds username, channel ID and client-reported `ssh_origin` /
+`ssh_destination`. The trusted `source_address` remains the actual SSH peer;
+client-reported origin metadata is not used for source restrictions. Enable
+Caddy debug logging for per-channel diagnostics as described below.
 
 ## Connection diagnostics
 
@@ -400,7 +542,7 @@ OPTIONS:
 
 ## SSH Wrapped Tunnel (using wrapSSH)
 
-When creating a tunnel with the `--wrapSSH` flag, the frontend connection is wrapped as an SSH tunnel. This allows users to connect to the exposed port using standard SSH local port forwarding (`ssh -L`), providing an additional layer of encryption and authentication.
+When creating a tunnel with the `--wrapSSH` flag, the frontend connection is wrapped as an SSH tunnel. This allows users to connect to the exposed port using standard SSH local port forwarding (`ssh -L`), providing encryption for the consumer connection. The wrapper accepts any username/password and does not provide consumer access control.
 
 ### Setup
 
@@ -741,24 +883,106 @@ Create a new template deployment using the template below (make sure that dnsNam
 
 # Embedding the client
 
-The client can be embedded in your app if the backend mappings are dynamic like in the case of a load balancer controller (see the kubernetes LoadBalancer repo for more):
+Client construction starts background connection/retry workers; a successful
+constructor return does **not** mean the server has accepted the tunnel.
+Use `WaitReady(ctx)` to wait for registration and retrieve the allocated port,
+or `Status()` to query a thread-safe snapshot at any time:
 
 ```go
-   ...
+import (
+	"context"
+	"fmt"
+	"time"
+
+	tunnel "github.com/dariopb/goreverselb/pkg"
+)
+
+func runTunnel(ctx context.Context, token string) error {
 	td := tunnel.TunnelData{
-		ServiceName:          "web8888",
-		Token:                "1234",
+		ServiceName:          "web",
+		Token:                token,
 		BackendAcceptBacklog: 1,
 		FrontendData: tunnel.FrontendData{
-			Port: 8888,   // passing 0 will let the frontend choose a port
+			Port: 0, // ask the server to allocate a frontend port
 		},
-		TargetPort:      80,
-		TargetAddresses: []string{"www.google.com"},
+		TargetPort:      8080,
+		TargetAddresses: []string{"127.0.0.1"},
+	}
+	tc, err := tunnel.NewMuxTunnelClient("localhost:9999", td)
+	if err != nil {
+		return err
+	}
+	defer tc.Close()
+
+	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	status, err := tc.WaitReady(readyCtx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("waiting for tunnel (state=%s, last error=%q): %w",
+			status.State, status.LastError, err)
+	}
+	if status.PublicationMode == "bindings_only" {
+		fmt.Println("Tunnel binding ready; no dedicated frontend port")
+	} else {
+		fmt.Printf("Tunnel ready at %s (allocated port %d)\n",
+			status.FrontendAddress, status.FrontendPort)
 	}
 
-   tc, err := tunnel.NewMuxTunnelClient("localhost:9999", td)
-   ...
-
-   tc.Close()
-
+	// Run your application until shutdown; the deferred Close stops the client.
+	<-ctx.Done()
+	return ctx.Err()
+}
 ```
+
+For monitoring while the application runs:
+
+```go
+status := tc.Status()
+fmt.Printf("state=%s ready=%d/%d frontend=%q last_error=%q\n",
+	status.State, status.ReadyConnections, status.DesiredConnections,
+	status.FrontendAddress, status.LastError)
+if status.State == tunnel.ClientStateReady {
+	// At least one control connection has an accepted registration.
+}
+```
+
+| State | Meaning |
+|---|---|
+| `connecting` | Connecting to the control endpoint, including its TLS handshake |
+| `registering` | TLS connected; waiting for the server to accept registration |
+| `ready` | At least one control connection has an accepted registration |
+| `reconnecting` | No ready/connecting/registering workers; waiting to retry after failure |
+| `closed` | Shutdown requested; `Close()` waits for all worker/stream cleanup |
+
+`ConnectedConnections` counts completed TLS handshakes, including registrations
+still pending. `ReadyConnections` counts accepted registrations. With a backlog
+greater than one, a single failed connection does not mark the entire client
+unready: the aggregate state prefers ready, then registering, then connecting,
+then reconnecting. `Connections` contains an independent per-worker snapshot,
+with stable zero-based IDs, state, frontend metadata, timestamps and errors.
+`LastError` is the most recent outstanding connection-attempt error; successful
+registration clears the corresponding worker's error. Tokens are not included
+in status, and echoed tokens are redacted from connection errors.
+
+`FrontendAddress` is an advertised `host:port`, falling back to the control
+endpoint's host when a standalone server does not advertise one. `FrontendPort`
+is the **server-confirmed** port, not merely the requested port. Aggregate
+frontend fields come from the lowest-ID ready connection; they are cleared
+when no connection is ready and refreshed after reconnection. Publication mode
+is `"dynamic"` or `"bindings_only"` for Caddy, and may be empty for standalone
+or older servers. A bindings-only registration is ready with port `0` and no
+frontend address. The older `tc.FrontendPort()` accessor remains compatible:
+it can contain the requested or last-reported port and is not a readiness check.
+
+`WaitReady` supports simultaneous callers without polling or callbacks. It
+continues waiting through retries; timeout/cancellation returns `ctx.Err()`,
+and client closure returns `net.ErrClosed`, together with a current snapshot.
+Cancelling a wait does not stop the client; call `Close()` for that. A ready
+snapshot describes control-plane registration at that instant, not backend
+health or a guarantee that a subsequent request cannot fail. Network loss is
+reflected when detected by I/O or yamux keepalives, not by an independent
+health probe.
+
+`NewMuxTunnelClient` retains historical insecure control-TLS compatibility.
+Use `NewMuxTunnelClientWithOptions` with verified TLS for production; both
+constructors expose the same status API.

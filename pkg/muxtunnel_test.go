@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -71,7 +72,13 @@ func TestStandaloneClientHalfCloseAndPortReuse(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(tc.Close)
-		waitForTunnel(t, func() bool { return tc.FrontendPort() == port })
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		status, err := tc.WaitReady(ctx)
+		cancel()
+		if err != nil || status.FrontendPort != port ||
+			status.FrontendAddress != fmt.Sprintf("127.0.0.1:%d", port) || status.PublicationMode != "" {
+			t.Fatalf("standalone readiness/address fallback: %+v %v", status, err)
+		}
 		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			t.Fatal(err)

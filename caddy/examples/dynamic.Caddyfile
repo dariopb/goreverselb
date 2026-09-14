@@ -1,0 +1,34 @@
+{
+	auto_https off
+	local_certs
+	skip_install_trust
+	pki {
+		ca local {
+			name "goreverselb local development CA"
+		}
+	}
+	admin 0.0.0.0:2020
+	goreverselb {
+		runtime_id edge
+		control :9999 {
+			tls localhost
+		}
+		user default@none {
+			token_env REVLB_TOKEN
+			register_services *
+			max_endpoints 32
+		}
+		publication dynamic {
+			admin_endpoint http://127.0.0.1:2020
+			bind_host 0.0.0.0
+			advertise_host localhost
+			ports 8000 100
+			default_template plain-http
+			template plain-http {
+				kind http
+				instance_dispatch direct
+				frontend_tls off
+			}
+		}
+	}
+}

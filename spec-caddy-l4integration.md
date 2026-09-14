@@ -179,6 +179,8 @@ assumption.
 | `http.reverse_proxy.transport.goreverselb` | HTTP round trips over registered tunnel streams | `http.RoundTripper` |
 | `layer4.handlers.goreverselb` | Terminal forwarding of an L4 connection into a tunnel | `layer4.NextHandler` |
 | `layer4.handlers.goreverselb_route` | Opt-in legacy instance preamble/CONNECT dispatch | `layer4.NextHandler` |
+| `layer4.handlers.goreverselb_ssh` | Opt-in consumer SSH local-forward wrapping ahead of L4 instance routing | `layer4.NextHandler` |
+| `caddy.adapters.goreverselb-caddyfile` | Standard Caddyfile adaptation plus native TLS certificate-file merging | `caddyconfig.Adapter` |
 
 Use `caddy.RegisterModule`, `CaddyModule`, provisioning, validation, cleanup, and
 compile-time interface assertions. Obtain structured loggers from the Caddy
@@ -341,10 +343,33 @@ must be authorized; clients cannot submit raw Caddy configuration.
 
 The selected template must explicitly support requested `TLSWrap`/`SSHWrap`
 semantics or registration fails. TLSWrap can map to a Caddy TLS-termination
-template with an authorized certificate name. SSHWrap is rejected until a
-Caddy handler implementing the existing consumer-facing SSH behavior exists;
-standalone SSH wrapping remains unchanged. A request must never succeed while
-silently omitting wrapping.
+template with an authorized certificate name. SSHWrap maps to an explicitly
+enabled `frontend_ssh` TCP template and the `goreverselb_ssh` L4 handler.
+Wrapping flags must match the template in both directions. Reject SSH wrapping
+on HTTP templates and combined frontend TLS/SSH wrapping rather than silently
+omitting a layer. Standalone SSH wrapping remains unchanged.
+
+The SSH handler owns no listener: generated Caddy L4 routes place it before a
+subroute containing the ordinary direct, SNI, or legacy instance routes.
+Every accepted `direct-tcpip` channel gets independent matcher state and a
+tunnel stream selected by the existing registry. SNI/legacy dispatch examines
+the decrypted channel payload, not the SSH username or requested forwarding
+destination. Destination metadata must never authorize arbitrary outbound
+dials. Half-closes, cancellation, bounded channel concurrency, and per-channel
+routing deadlines must be preserved; a channel deadline must not close sibling
+channels. Compatible publication reloads preserve live SSH connections and
+their existing forwarding streams.
+
+Persist an Ed25519 host key per runtime in Caddy storage under
+`goreverselb/<runtime_id>/ssh_host_key`, using storage locking for creation.
+Never replace a corrupt stored key silently. Log its public fingerprint, not
+key material. Preserve the standalone encryption-only behavior: any supplied
+username/password is accepted, with no claim of consumer authentication.
+Passkey/token-based authentication is future work. Registration authentication
+is independent and still mandatory. Restrict sources before the SSH handshake
+using the actual SSH peer, not client-reported origin metadata. Preserve all
+existing connection/stream/copy diagnostics and add SSH peer, user, channel,
+origin and destination context without logging passwords, tokens or payloads.
 
 Send `TunnelDataResponse.FrontendPort` with the actual allocated/requested port
 only after the generated Caddy configuration is committed and ready to accept
@@ -488,8 +513,9 @@ configuration, preserving valid existing wire identities. Do not silently
 reinterpret malformed identifiers into another user's service.
 
 The standalone SSH remote-forwarding feature and consumer-facing SSH wrapping
-remain supported in their existing mode. Neither becomes an implicit Caddy
-feature. A future SSH registration adapter can implement the same stream-dialing
+remain supported in their existing mode. Consumer wrapping in Caddy is an
+explicit opt-in TCP template; SSH remote-forward registration is still separate.
+A future SSH registration adapter can implement the same stream-dialing
 contract, but requires an explicit mapping from SSH forwarding identities to
 bindings and real cancellation/deadline semantics.
 
@@ -830,6 +856,37 @@ Equivalent proposed policy/template syntax:
 Here `ports` takes a starting port and count, not two inclusive endpoints.
 Adaptation emits only the base policy. Subsequent generated routes are stored
 in Caddy's active JSON/autosave, not written back to this source Caddyfile.
+
+#### Certificate files without static sites
+
+The implemented extended adapter, selected with
+`--adapter goreverselb-caddyfile`, accepts repeatable
+`certificate <certificate-chain.pem> <private-key.pem>` directives inside the
+global `goreverselb` block. It delegates ordinary syntax, imports, environment
+substitution, regular sites, and warnings to Caddy's standard adapter, then
+merges those file pairs into `apps.tls.certificates.load_files`.
+
+The resulting native JSON must contain only standard TLS loader configuration,
+not adaptation-only fields on the goreverselb app. Preserve unrelated apps,
+TLS automation/PKI policies, other certificate loaders, and existing file
+loader tags. Deduplicate identical file pairs without removing site-specific
+certificate selection. Adding certificate files must not create a static
+listener or take ownership of a dynamically allocated port.
+
+Use Caddy's existing loader for file access, key/certificate validation,
+certificate caching and cleanup. Never embed PEM/key contents in the generated
+configuration or add a parallel certificate cache. File load failures reject
+provisioning; rejected reloads preserve the active configuration. Externally
+renewed files are re-read on forced reload. When a source-policy reload omits
+generated routes, reconciliation must restore still-authorized live bindings
+from recorded publication leases, retaining acknowledged ports rather than
+allocating replacements. Missing leases or incompatible publication policy must
+fail explicitly. Current restoration is asynchronous and may briefly interrupt
+new frontend connections. Ordinary Caddyfiles without this
+directive retain standard adapter behavior; using the directive without the
+extended adapter must produce an actionable error rather than silently ignore
+it. The checked-in `caddy/examples/certificates.Caddyfile` demonstrates a
+supplied wildcard certificate, control port 9000 and requested frontend 7445.
 
 ### 9.4 Optional static bindings: HTTP and L4 using the same registry
 

@@ -1,0 +1,48 @@
+{
+  "admin": {"listen": "0.0.0.0:2020"},
+  "apps": {
+    "goreverselb": {
+      "runtime_id": "edge",
+      "control": {
+        "listen": [":9999"],
+        "tls": {"server_name": "localhost"}
+      },
+      "users": {
+        "default@none": {
+          "token_env": "REVLB_TOKEN",
+          "registration": {
+            "service_patterns": ["*"],
+            "max_endpoints": 32
+          }
+        }
+      },
+      "publication": {
+        "mode": "dynamic",
+        "admin_endpoint": "http://127.0.0.1:2020",
+        "bind_host": "0.0.0.0",
+        "advertise_host": "localhost",
+        "port_start": 8000,
+        "port_count": 100,
+        "default_template": "plain-http",
+        "templates": {
+          "plain-http": {"kind": "http", "instance_dispatch": "direct", "frontend_tls": false}
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {"issuers": [{"module": "internal"}]}
+        ]
+      }
+    },
+    "pki": {
+      "certificate_authorities": {
+        "local": {
+          "name": "goreverselb local development CA",
+          "install_trust": false
+        }
+      }
+    }
+  }
+}

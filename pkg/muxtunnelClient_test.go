@@ -146,6 +146,14 @@ func TestClientTLSVerification(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("TLS attempt stalled")
 			}
+			if !test.success {
+				status := awaitClientStatus(t, client, func(s ClientStatus) bool {
+					return s.State == ClientStateReconnecting && s.LastError != ""
+				})
+				if status.ConnectedConnections != 0 || status.ReadyConnections != 0 || status.FrontendPort != 0 {
+					t.Fatalf("failed TLS handshake was reported as connected: %+v", status)
+				}
+			}
 		})
 	}
 }

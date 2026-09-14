@@ -1,0 +1,35 @@
+{
+	auto_https off
+	admin 0.0.0.0:2020
+	goreverselb {
+		runtime_id edge
+		certificate "{$REVLB_CERT_FILE}" "{$REVLB_KEY_FILE}"
+		control :9000 {
+			tls multi-1.apps.cloudexmaquina.com
+		}
+		user default@none {
+			token_env REVLB_TOKEN
+			register_services *
+			max_endpoints 32
+		}
+		publication dynamic {
+			admin_endpoint http://127.0.0.1:2020
+			bind_host 0.0.0.0
+			advertise_host multi-1.apps.cloudexmaquina.com
+			ports 7400 700
+			default_template plain-http
+			rule default@none multi-1 multi-tls
+			template plain-http {
+				kind http
+				instance_dispatch direct
+				frontend_tls off
+			}
+			template multi-tls {
+				kind tcp
+				instance_dispatch direct
+				frontend_tls on
+				tls_server_name multi-1.apps.cloudexmaquina.com
+			}
+		}
+	}
+}
